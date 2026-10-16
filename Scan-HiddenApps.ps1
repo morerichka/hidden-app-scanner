@@ -1,7 +1,7 @@
 ﻿<#
-  Scan-HiddenApps.ps1 — аудит скрытых / замаскированных программ (майнеры, шпионы, RAT).
-  ТОЛЬКО ЧТЕНИЕ: ничего не удаляет, не меняет, никуда не отправляет данные.
-  Результат: HTML-отчёт в папке reports\.
+  Scan-HiddenApps.ps1 - audit for hidden / masquerading programs (miners, spyware, RATs).
+  READ-ONLY: deletes nothing, changes nothing, sends no data anywhere (except SHA256 hashes to VirusTotal if you opt in).
+  Output: an HTML report in the reports\ folder.
 #>
 [CmdletBinding()]
 param(
@@ -23,18 +23,18 @@ if (-not $OutDir) { $OutDir = Join-Path $scriptDir 'reports' }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $NoElevate) {
-  Write-Host 'Запрашиваю права администратора (нужны, чтобы видеть все процессы и службы)...' -ForegroundColor Yellow
+  Write-Host 'Requesting administrator rights (needed to see all processes and services)...' -ForegroundColor Yellow
   $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Pause -SampleSeconds $SampleSeconds"
   if ($DeepFiles) { $argList += ' -DeepFiles' }
   if ($SkipModules) { $argList += ' -SkipModules' }
   if ($UseVirusTotal) { $argList += " -UseVirusTotal -VtMax $VtMax" }
   try { Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -ErrorAction Stop; exit }
-  catch { Write-Host 'UAC отклонён — продолжаю без прав администратора, отчёт будет менее полным.' -ForegroundColor Yellow }
+  catch { Write-Host 'UAC declined - continuing without administrator rights, the report will be less complete.' -ForegroundColor Yellow }
 }
 
 function Write-Step($t) { Write-Host "[*] $t" -ForegroundColor Cyan }
 
-# ---------------------------------------------------------------- справочники
+# ---------------------------------------------------------------- reference data
 $winDir = $env:SystemRoot.ToLower()
 $sys32 = "$winDir\system32"
 $SysProc = @{
@@ -70,7 +70,7 @@ $RatRx = 'anydesk|teamviewer|tv_w32|tv_x64|rustdesk|ultravnc|winvnc|tightvnc|tvn
 $SpyRx = 'keylog|spyrix|refog|kidlogger|hoverwatch|actualspy|actual spy|webwatcher|qustodio|flexispy|spytech|netvizor|realtime-spy|pc pandora|pcpandora|ardamax|wolfeye|teramind|activtrak|veriato|hubstaff|time doctor|timedoctor|controlio|work examiner|workexaminer|interguard|staffcop|kickidler|mipko|bosspy|sniperspy|spector ?pro|mobistealth|spyera|ikeymonitor|clevguard|kidsguard|spyhuman|employee monitor|stealthgenie|lightlogger|revealer'
 $AvDomainRx = 'microsoft|windowsupdate|defender|kaspersky|avast|avg\.|eset|malwarebytes|virustotal|bitdefender|norton|mcafee|sophos|trendmicro|drweb|avira'
 
-# ---------------------------------------------------------------- вспомогательные функции
+# ---------------------------------------------------------------- helper functions
 function Esc($s) { if ($null -eq $s) { return '' }; return [System.Net.WebUtility]::HtmlEncode([string]$s) }
 
 function Get-Lev($a, $b) {
@@ -150,10 +150,10 @@ function Get-ExePathFromCommand($cmd) {
 
 function Get-LocationReason($path) {
   $l = $path.ToLower()
-  if ($l -match '\\appdata\\local\\temp\\|\\windows\\temp\\|\\temp\\|\\tmp\\') { return @{ P = 3; T = 'запускается из папки Temp (типичное место для малвари)' } }
-  if ($l -match '\\users\\public\\|\\\$recycle\.bin\\|\\downloads\\') { return @{ P = 3; T = 'запускается из Public / Downloads / Корзины' } }
-  if ($l -match '\\programdata\\' -and $l -notmatch '\\programdata\\(microsoft|package cache)\\') { return @{ P = 2; T = 'запускается из ProgramData' } }
-  if ($l -match '\\appdata\\(roaming|local)\\') { return @{ P = 1; T = 'запускается из AppData (так делают и нормальные программы, и малварь)' } }
+  if ($l -match '\\appdata\\local\\temp\\|\\windows\\temp\\|\\temp\\|\\tmp\\') { return @{ P = 3; T = 'runs from a Temp folder (typical place for malware)' } }
+  if ($l -match '\\users\\public\\|\\\$recycle\.bin\\|\\downloads\\') { return @{ P = 3; T = 'runs from Public / Downloads / Recycle Bin' } }
+  if ($l -match '\\programdata\\' -and $l -notmatch '\\programdata\\(microsoft|package cache)\\') { return @{ P = 2; T = 'runs from ProgramData' } }
+  if ($l -match '\\appdata\\(roaming|local)\\') { return @{ P = 1; T = 'runs from AppData (legitimate programs do this too, and so does malware)' } }
   return $null
 }
 
@@ -163,8 +163,8 @@ function Get-PathReasons($path, [switch]$Stale) {
   if ([string]::IsNullOrWhiteSpace($path)) { return ,$r }
   $t = Get-FileTrust $path
   if (-not $t.Exists) {
-    if ($Stale) { $r.Add(@{ P = 1; T = 'запись ведёт на несуществующий файл (скорее всего, программу удалили, а запись осталась)' }) }
-    else { $r.Add(@{ P = 5; T = 'файл запущенного процесса не найден на диске (удалён после запуска или подменён)' }) }
+    if ($Stale) { $r.Add(@{ P = 1; T = 'entry points to a file that does not exist (most likely the program was uninstalled but the entry remained)' }) }
+    else { $r.Add(@{ P = 5; T = 'the running process image is missing on disk (deleted after launch or replaced)' }) }
     return ,$r
   }
   $isStore = ($path -match '\\WindowsApps\\')
@@ -176,10 +176,10 @@ function Get-PathReasons($path, [switch]$Stale) {
   if ($ext -in '.exe', '.dll', '.sys', '.scr', '.com' -and -not $isStore) {
     switch ($t.Status) {
       'Valid' { }
-      'UnknownError' { $r.Add(@{ P = 1; T = 'не удалось проверить подпись' }) }
-      'NotSigned' { $r.Add(@{ P = 2; T = 'нет цифровой подписи' }) }
-      'HashMismatch' { $r.Add(@{ P = 6; T = 'подпись есть, но файл изменён после подписания (HashMismatch)' }) }
-      default { $r.Add(@{ P = 3; T = "подпись недействительна ($($t.Status))" }) }
+      'UnknownError' { $r.Add(@{ P = 1; T = 'could not verify the signature' }) }
+      'NotSigned' { $r.Add(@{ P = 2; T = 'no digital signature' }) }
+      'HashMismatch' { $r.Add(@{ P = 6; T = 'signed, but the file was modified after signing (HashMismatch)' }) }
+      default { $r.Add(@{ P = 3; T = "signature is invalid ($($t.Status))" }) }
     }
   }
   if (-not $isStore) { $loc = Get-LocationReason $path; if ($loc) { $r.Add($loc) } }
@@ -190,39 +190,39 @@ function Get-PathReasons($path, [switch]$Stale) {
       $dl = $d.ToLower()
       if ($dir -eq $dl -or $dir.StartsWith($dl + '\')) { $ok = $true }
     }
-    if (-not $ok) { $r.Add(@{ P = 8; T = "маскируется под системный процесс $name, но лежит в $dir" }) }
-    elseif (-not $t.IsMs) { $r.Add(@{ P = 6; T = "носит имя системного процесса $name, но подписан не Microsoft ($($t.Signer))" }) }
+    if (-not $ok) { $r.Add(@{ P = 8; T = "masquerades as the system process $name but lives in $dir" }) }
+    elseif (-not $t.IsMs) { $r.Add(@{ P = 6; T = "has the name of the system process $name but is not signed by Microsoft ($($t.Signer))" }) }
   }
   elseif (-not $t.IsMs -and $base.Length -ge 5) {
     foreach ($sn in $SysBaseNames) {
       $dist = Get-Lev $base $sn
       if (($dist -eq 1) -or ($dist -eq 2 -and $base.Length -ge 8)) {
-        $r.Add(@{ P = 8; T = "имя «$base» подозрительно похоже на системное «$sn»" }); break
+        $r.Add(@{ P = 8; T = "the name '$base' looks suspiciously like the system name '$sn'" }); break
       }
     }
   }
-  if (($name -match '[a-z]') -and ($name -match '[\u0400-\u04FF]')) { $r.Add(@{ P = 5; T = 'в имени файла смешаны латиница и кириллица (подмена букв)' }) }
-  if ($name -match '\.(pdf|docx?|xlsx?|jpe?g|png|txt|zip|rar)\.(exe|scr|com|bat|cmd)$') { $r.Add(@{ P = 7; T = 'двойное расширение (документ.pdf.exe)' }) }
+  if (($name -match '[a-z]') -and ($name -match '[\u0400-\u04FF]')) { $r.Add(@{ P = 5; T = 'the file name mixes Latin and Cyrillic letters (homoglyph trick)' }) }
+  if ($name -match '\.(pdf|docx?|xlsx?|jpe?g|png|txt|zip|rar)\.(exe|scr|com|bat|cmd)$') { $r.Add(@{ P = 7; T = 'double extension (document.pdf.exe)' }) }
   if ($t.Status -ne 'Valid' -and $base -match '^[a-z0-9]{6,16}$' -and $base -match '\d' -and $base -match '[a-z]') {
-    $r.Add(@{ P = 2; T = 'имя файла похоже на случайный набор символов' })
+    $r.Add(@{ P = 2; T = 'the file name looks like random characters' })
   }
-  if ($base -match $MinerNames) { $r.Add(@{ P = 8; T = 'имя файла совпадает с известным майнером' }) }
-  if ($base -match $SpyRx) { $r.Add(@{ P = 6; T = 'имя файла совпадает с известной программой слежки / кейлоггером' }) }
-  elseif ($base -match $RatRx) { $r.Add(@{ P = 4; T = 'программа удалённого доступа — убедитесь, что вы сами её ставили' }) }
+  if ($base -match $MinerNames) { $r.Add(@{ P = 8; T = 'the file name matches a known miner' }) }
+  if ($base -match $SpyRx) { $r.Add(@{ P = 6; T = 'the file name matches known stalkerware / a keylogger' }) }
+  elseif ($base -match $RatRx) { $r.Add(@{ P = 4; T = 'remote-access tool - make sure you installed it yourself' }) }
   return ,$r
 }
 
 function Get-CmdReasons($cmd) {
   $r = New-Object System.Collections.Generic.List[object]
   if ([string]::IsNullOrWhiteSpace($cmd)) { return ,$r }
-  if ($cmd -match $MinerRx) { $r.Add(@{ P = 8; T = 'в командной строке признаки майнера (пул stratum / алгоритм / кошелёк)' }) }
-  if ($cmd -match '(?i)\s-e(nc|ncodedcommand)?\s+[A-Za-z0-9+/=]{40,}') { $r.Add(@{ P = 5; T = 'закодированная (base64) команда PowerShell' }) }
-  if ($cmd -match '(?i)-w(indowstyle)?\s+hidden') { $r.Add(@{ P = 3; T = 'запуск со скрытым окном' }) }
-  if ($cmd -match '(?i)downloadstring|downloadfile|invoke-webrequest|\biwr\b|net\.webclient') { $r.Add(@{ P = 4; T = 'PowerShell скачивает данные из сети прямо в команде' }) }
-  if ($cmd -match '(?i)frombase64string') { $r.Add(@{ P = 3; T = 'команда раскодирует base64 и, возможно, выполняет скрытый код' }) }
-  if ($cmd -match '(?i)\biex\b|invoke-expression') { $r.Add(@{ P = 2; T = 'команда выполняет строку как код (Invoke-Expression) — бывает у легитимных оболочек и у вредоносных скриптов' }) }
-  if ($cmd -match '(?i)(mshta|regsvr32|certutil|bitsadmin|wscript|cscript)(\.exe)?["'']?\s.*https?://') { $r.Add(@{ P = 5; T = 'системная утилита запускает что-то по ссылке из интернета' }) }
-  if ($cmd -match '(?i)certutil.*-urlcache') { $r.Add(@{ P = 5; T = 'certutil скачивает файл из интернета' }) }
+  if ($cmd -match $MinerRx) { $r.Add(@{ P = 8; T = 'the command line shows miner indicators (stratum pool / algorithm / wallet)' }) }
+  if ($cmd -match '(?i)\s-e(nc|ncodedcommand)?\s+[A-Za-z0-9+/=]{40,}') { $r.Add(@{ P = 5; T = 'encoded (base64) PowerShell command' }) }
+  if ($cmd -match '(?i)-w(indowstyle)?\s+hidden') { $r.Add(@{ P = 3; T = 'launched with a hidden window' }) }
+  if ($cmd -match '(?i)downloadstring|downloadfile|invoke-webrequest|\biwr\b|net\.webclient') { $r.Add(@{ P = 4; T = 'PowerShell downloads data from the network right in the command' }) }
+  if ($cmd -match '(?i)frombase64string') { $r.Add(@{ P = 3; T = 'the command decodes base64 and possibly runs hidden code' }) }
+  if ($cmd -match '(?i)\biex\b|invoke-expression') { $r.Add(@{ P = 2; T = 'the command executes a string as code (Invoke-Expression) - seen in legitimate shells and in malicious scripts' }) }
+  if ($cmd -match '(?i)(mshta|regsvr32|certutil|bitsadmin|wscript|cscript)(\.exe)?["'']?\s.*https?://') { $r.Add(@{ P = 5; T = 'a system utility runs something from an internet URL' }) }
+  if ($cmd -match '(?i)certutil.*-urlcache') { $r.Add(@{ P = 5; T = 'certutil downloads a file from the internet' }) }
   return ,$r
 }
 
@@ -237,7 +237,7 @@ function Uniq-Texts($list) {
   return ,$out
 }
 function Get-SevClass($pts) { if ($pts -ge 8) { 'high' } elseif ($pts -ge 4) { 'med' } elseif ($pts -ge 2) { 'low' } else { 'info' } }
-function Get-SevName($pts) { if ($pts -ge 8) { 'Высокий' } elseif ($pts -ge 4) { 'Средний' } elseif ($pts -ge 2) { 'Низкий' } else { 'Инфо' } }
+function Get-SevName($pts) { if ($pts -ge 8) { 'High' } elseif ($pts -ge 4) { 'Medium' } elseif ($pts -ge 2) { 'Low' } else { 'Info' } }
 
 $Findings = New-Object System.Collections.Generic.List[object]
 function Add-Finding($Points, $Category, $Title, $Reasons, $Target, $Hash) {
@@ -245,8 +245,8 @@ function Add-Finding($Points, $Category, $Title, $Reasons, $Target, $Hash) {
   $Findings.Add([pscustomobject]@{ Points = $Points; Category = $Category; Title = $Title; Reasons = @($Reasons); Target = $Target; Hash = $Hash })
 }
 
-# ---------------------------------------------------------------- 1. процессы + замер CPU/GPU
-Write-Step 'Собираю процессы и сетевые подключения...'
+# ---------------------------------------------------------------- 1. processes + CPU/GPU sampling
+Write-Step 'Collecting processes and network connections...'
 $cim = @(Get-CimInstance Win32_Process)
 $byId = @{}
 foreach ($p in $cim) { $byId[[int]$p.ProcessId] = $p }
@@ -260,7 +260,7 @@ foreach ($c in @(Get-NetTCPConnection)) {
   $netByPid[$id].Add($c)
 }
 
-Write-Step "Замеряю нагрузку CPU/GPU ($SampleSeconds сек) — лучше ничего не запускать в это время..."
+Write-Step "Sampling CPU/GPU load ($SampleSeconds s) - better not to run anything meanwhile..."
 $cpu0 = @{}
 foreach ($p in [Diagnostics.Process]::GetProcesses()) { try { $cpu0[$p.Id] = $p.TotalProcessorTime.TotalSeconds } catch { } }
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -289,7 +289,7 @@ foreach ($p in [Diagnostics.Process]::GetProcesses()) {
 $gpuPct = @{}
 foreach ($k in $gpuSum.Keys) { $gpuPct[$k] = [Math]::Min(100, [Math]::Round($gpuSum[$k] / [Math]::Max($gpuN, 1), 1)) }
 
-Write-Step 'Проверяю подписи и поведение процессов...'
+Write-Step 'Checking signatures and process behavior...'
 $groups = @{}
 foreach ($p in $cim) {
   $id = [int]$p.ProcessId
@@ -314,7 +314,7 @@ foreach ($key in $groups.Keys) {
     foreach ($x in (Get-PathReasons $path)) { $reasons.Add($x) }
     $trust = Get-FileTrust $path
   } elseif ($isAdmin -and $lname -notin $pseudo) {
-    $reasons.Add(@{ P = 1; T = 'не удалось определить путь к файлу процесса (у защищённых системных процессов это нормально)' })
+    $reasons.Add(@{ P = 1; T = 'could not determine the process image path (normal for protected system processes)' })
   }
 
   $cmdHits = New-Object System.Collections.Generic.List[string]
@@ -327,12 +327,12 @@ foreach ($key in $groups.Keys) {
       if ($cmdHits.Count -lt 2 -and $p.CommandLine -notin $cmdHits) { $cmdHits.Add($p.CommandLine) }
     }
     if ($lname -eq 'svchost.exe' -and $p.CommandLine -and $p.CommandLine -notmatch '\s-k\s') {
-      $reasons.Add(@{ P = 5; T = 'svchost запущен без параметра -k (настоящие svchost всегда запускаются с ним)' })
+      $reasons.Add(@{ P = 5; T = 'svchost started without the -k parameter (real svchost instances always have it)' })
     }
     if ($SysProc.ContainsKey($lname) -and $SysProc[$lname].Parent) {
       $par = $byId[[int]$p.ParentProcessId]
       if ($par -and $par.Name.ToLower() -ne $SysProc[$lname].Parent) {
-        $reasons.Add(@{ P = 4; T = "неожиданный родительский процесс: $($par.Name) (ожидается $($SysProc[$lname].Parent))" })
+        $reasons.Add(@{ P = 4; T = "unexpected parent process:$($par.Name) (expected$($SysProc[$lname].Parent))" })
       }
     }
     if ($cpuPct.ContainsKey($id)) { $cpuSum += $cpuPct[$id] }
@@ -348,27 +348,27 @@ foreach ($key in $groups.Keys) {
     }
   }
   $notValid = [bool]($trust -and $trust.Status -ne 'Valid' -and $path -notmatch '\\WindowsApps\\')
-  if ($cpuSum -ge 25 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "высокая нагрузка CPU ($([Math]::Round($cpuSum,0))% всех ядер) у неподписанной программы" }) }
-  if ($gpuMax -ge 40 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "высокая нагрузка GPU ($gpuMax%) у неподписанной программы" }) }
-  if ($ext -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "неподписанная программа обменивается данными с интернетом ($ext соед.)" }) }
-  if ($mine.Count -gt 0) { $reasons.Add(@{ P = 3; T = "подключения к портам, типичным для майнинг-пулов: $((@($mine | Select-Object -Unique)) -join ', ')" }) }
-  if ($listenAll -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = 'неподписанная программа слушает входящие соединения из сети' }) }
+  if ($cpuSum -ge 25 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "high CPU load ($([Math]::Round($cpuSum,0))% of all cores) from an unsigned program" }) }
+  if ($gpuMax -ge 40 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "high GPU load ($gpuMax%) from an unsigned program" }) }
+  if ($ext -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "an unsigned program talks to the internet ($ext connections)" }) }
+  if ($mine.Count -gt 0) { $reasons.Add(@{ P = 3; T = "connections to ports typical for mining pools:$((@($mine | Select-Object -Unique)) -join ', ')" }) }
+  if ($listenAll -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = 'an unsigned program listens for incoming network connections' }) }
 
   $TopLoad.Add([pscustomobject]@{ Name = $name; Count = $inst.Count; Cpu = [Math]::Round($cpuSum, 1); Gpu = $gpuMax; Signer = $(if ($trust) { $trust.Signer } else { '' }); Path = $path })
 
   $pts = Sum-Reasons $reasons
   if ($pts -ge 2) {
     $ids = ($inst | Select-Object -First 5 | ForEach-Object { $_.ProcessId }) -join ', '
-    $title = "$name  (PID: $ids$(if ($inst.Count -gt 5) { '…' }))"
-    $tgt = if ($path) { $path } else { '(путь неизвестен)' }
-    if ($cmdHits.Count -gt 0) { foreach ($ch in $cmdHits) { $tgt += "`n> " + $(if ($ch.Length -gt 400) { $ch.Substring(0, 400) + '…' } else { $ch }) } }
+    $title = "$name  (PID: $ids$(if ($inst.Count -gt 5) { '...' }))"
+    $tgt = if ($path) { $path } else { '(path unknown)' }
+    if ($cmdHits.Count -gt 0) { foreach ($ch in $cmdHits) { $tgt += "`n> " + $(if ($ch.Length -gt 400) { $ch.Substring(0, 400) + '...' } else { $ch }) } }
     elseif ($inst[0].CommandLine -and $inst.Count -eq 1) { $tgt += "`n" + $inst[0].CommandLine }
-    Add-Finding $pts 'Процесс' $title (Uniq-Texts $reasons) $tgt $(if ($trust) { $trust.Hash } else { '' })
+    Add-Finding $pts 'Process' $title (Uniq-Texts $reasons) $tgt $(if ($trust) { $trust.Hash } else { '' })
   }
 }
 
-# скрытые процессы: сверка двух источников
-Write-Step 'Сверяю списки процессов (поиск скрытых от диспетчера)...'
+# hidden processes: cross-check two sources
+Write-Step 'Cross-checking process lists (looking for processes hidden from Task Manager)...'
 $gpIds = @([Diagnostics.Process]::GetProcesses() | ForEach-Object { $_.Id })
 $cimIds = @(Get-CimInstance Win32_Process | ForEach-Object { [int]$_.ProcessId })
 $onlyGp = @($gpIds | Where-Object { $_ -ne 0 -and $_ -notin $cimIds })
@@ -377,11 +377,11 @@ foreach ($id in $onlyGp) {
   $still = Get-Process -Id $id
   $inCim = Get-CimInstance Win32_Process -Filter "ProcessId=$id"
   if ($still -and -not $inCim) {
-    Add-Finding 4 'Процесс' "PID $id ($($still.ProcessName)) виден в одном списке процессов, но скрыт в другом" @('расхождение между двумя способами перечисления процессов — признак руткита; часто бывает и ложным (процесс только что завершился)') '' ''
+    Add-Finding 4 'Process' "PID $id ($($still.ProcessName)) is visible in one process listing but hidden in another" @('mismatch between two ways of listing processes - a rootkit sign; often a false alarm (the process has just exited)') '' ''
   }
 }
 
-# ---------------------------------------------------------------- 1б. внедрённые DLL и память без файла
+# ---------------------------------------------------------------- 1b. injected DLLs and memory without a file
 $ForeignDlls = New-Object System.Collections.Generic.List[object]
 function Test-SameApp($a, $b) {
   $sa = $a.ToLower().Split('\'); $sb2 = $b.ToLower().Split('\')
@@ -392,8 +392,8 @@ function Test-SameApp($a, $b) {
 }
 
 if (-not $SkipModules) {
-  if (-not $isAdmin) { Write-Host '[!] Без прав администратора список модулей у многих процессов недоступен — проверка DLL будет неполной.' -ForegroundColor Yellow }
-  Write-Step 'Проверяю загруженные в процессы DLL (внедрение) и исполняемую память без файла — это самый долгий этап...'
+  if (-not $isAdmin) { Write-Host '[!] Without administrator rights the module list is unavailable for many processes - the DLL check will be incomplete.' -ForegroundColor Yellow }
+  Write-Step 'Checking DLLs loaded into processes (injection) and executable memory without a file - the slowest stage...'
   if (-not ('MemScan' -as [type])) {
     Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
@@ -440,39 +440,39 @@ public static class MemScan {
       $isStore = ($mp -match '\\WindowsApps\\' -or $mp -match '(?i)\\windows\\(assembly\\nativeimages_|microsoft\.net\\assembly\\)')
       $reasons = New-Object System.Collections.Generic.List[object]
       if (-not $mt.Exists) {
-        $reasons.Add(@{ P = 4; T = 'DLL загружена в процесс, но файла на диске нет (удалён или подменён)' })
+        $reasons.Add(@{ P = 4; T = 'a DLL is loaded into the process but its file is missing on disk (deleted or replaced)' })
       } else {
         $loc = Get-LocationReason $mp
-        if ($mt.Status -eq 'HashMismatch') { $reasons.Add(@{ P = 6; T = 'DLL изменена после подписания (HashMismatch)' }) }
+        if ($mt.Status -eq 'HashMismatch') { $reasons.Add(@{ P = 6; T = 'the DLL was modified after signing (HashMismatch)' }) }
         if ($pIsSystem) {
-          if ($mt.Status -notin 'Valid', 'UnknownError' -and -not $isStore) { $reasons.Add(@{ P = 5; T = "в системный процесс Microsoft ($pname) загружена DLL без действительной подписи ($($mt.Status))" }) }
-          elseif ($loc -and $loc.P -ge 2 -and -not $mt.IsMs) { $reasons.Add(@{ P = 6; T = "в системный процесс ($pname) загружена DLL из пользовательской папки" }) }
+          if ($mt.Status -notin 'Valid', 'UnknownError' -and -not $isStore) { $reasons.Add(@{ P = 5; T = "a DLL without a valid signature is loaded into the Microsoft system process ($pname) ($($mt.Status))" }) }
+          elseif ($loc -and $loc.P -ge 2 -and -not $mt.IsMs) { $reasons.Add(@{ P = 6; T = "a DLL from a user-writable folder is loaded into the system process ($pname)" }) }
           elseif (-not $mt.IsMs -and $mt.Exists -and $mp -notmatch '(?i)\\assembly\\nativeimages_') { $ForeignDlls.Add([pscustomobject]@{ Process = $pname; Dll = $mp; Signer = $mt.Signer; Status = $mt.Status }) }
         } else {
           if ($mt.Status -eq 'NotSigned' -and -not $isStore -and -not (Test-SameApp $exePath $mp) -and $mp -notmatch '(?i)^c:\\windows\\') {
-            $reasons.Add(@{ P = 3; T = "неподписанная DLL, лежащая не рядом с программой $pname (внедрение или чужая библиотека)" })
+            $reasons.Add(@{ P = 3; T = "an unsigned DLL located away from the program $pname (injection or a foreign library)" })
           }
           if ($loc -and $loc.P -ge 3 -and -not (Test-SameApp $exePath $mp)) { $reasons.Add($loc) }
         }
       }
       $pts = Sum-Reasons $reasons
-      if ($pts -ge 3) { Add-Finding $pts 'Внедрённая DLL' "$pname ← $([IO.Path]::GetFileName($mp))" (Uniq-Texts $reasons) $mp $mt.Hash }
+      if ($pts -ge 3) { Add-Finding $pts 'Injected DLL' "$pname <- $([IO.Path]::GetFileName($mp))" (Uniq-Texts $reasons) $mp $mt.Hash }
     }
-    # исполняемая память без файла — только в процессах, где JIT не ожидается
+    # executable memory without a file - only in processes where JIT is not expected
     if ($exePath.ToLower().StartsWith($winDir) -and $pname -notmatch $jitHosts) {
       $n = [MemScan]::CountRwx($pr.Id)
       $isDotnet = [bool]($mods | Where-Object { $_.ModuleName -match '^(clr|coreclr|clrjit|mscoree)\.dll$' })
       if ($n -eq 1) { $rwxOne.Add("$pname (PID $($pr.Id))") }
       elseif ($n -ge 2 -and -not $isDotnet) {
-        Add-Finding 4 'Внедрённая DLL' "$pname (PID $($pr.Id)): $n областей памяти «чтение+запись+исполнение» без файла" @('в системном процессе без .NET/JIT есть несколько исполняемых областей памяти, не привязанных к файлу — так выглядит внедрённый код (shellcode, reflective DLL). Бывает и у защитных драйверов') $exePath ''
+        Add-Finding 4 'Injected DLL' "$pname (PID $($pr.Id)): $n memory regions that are read+write+execute without a backing file" @('a system process without .NET/JIT has several executable memory regions not backed by a file - this is what injected code (shellcode, reflective DLL) looks like. Protective drivers can do this too') $exePath ''
       }
     }
   }
   if ($rwxOne.Count -ge 3) {
-    Add-Finding 2 'Внедрённая DLL' "В $($rwxOne.Count) системных процессах найдено по одной исполняемой области памяти без файла (единый шаблон)" @('одинаковая картина сразу во многих процессах — признак общего механизма, а не точечного внедрения: обычно это защитные хуки антивируса или драйвера (у вас стоит Bitdefender). Если антивируса нет — стоит присмотреться') (($rwxOne | Select-Object -First 25) -join ', ') ''
+    Add-Finding 2 'Injected DLL' "$($rwxOne.Count) system processes each have one executable memory region without a file (uniform pattern)" @('the same picture across many processes points to a shared mechanism rather than targeted injection: usually protective hooks of an antivirus or driver. If you have no antivirus, take a closer look') (($rwxOne | Select-Object -First 25) -join ', ') ''
   }
 }
-# ---------------------------------------------------------------- 2. автозапуск
+# ---------------------------------------------------------------- 2. autostart
 $Autoruns = New-Object System.Collections.Generic.List[object]
 function Test-Autorun($Source, $Name, $Cmd, $Category) {
   $exp = [Environment]::ExpandEnvironmentVariables([string]$Cmd)
@@ -484,12 +484,12 @@ function Test-Autorun($Source, $Name, $Cmd, $Category) {
     $trust = Get-FileTrust $path
   }
   foreach ($x in (Get-CmdReasons $exp)) { $reasons.Add($x) }
-  # скрипты в пользовательских папках, запускаемые через интерпретаторы
+  # scripts in user folders launched through interpreters
   foreach ($m in [regex]::Matches($exp, '([A-Za-z]:\\[^"''\r\n]+?\.(ps1|vbs|vbe|js|jse|bat|cmd|hta|wsf))', 'IgnoreCase')) {
     $sp = $m.Groups[1].Value
     $lr = Get-LocationReason $sp
-    if ($lr) { $reasons.Add(@{ P = [Math]::Max($lr.P, 2); T = "запускает скрипт из пользовательской папки: $sp" }) }
-    if (-not (Test-Path -LiteralPath $sp)) { $reasons.Add(@{ P = 3; T = "скрипт не найден: $sp" }) }
+    if ($lr) { $reasons.Add(@{ P = [Math]::Max($lr.P, 2); T = "runs a script from a user-writable folder:$sp" }) }
+    if (-not (Test-Path -LiteralPath $sp)) { $reasons.Add(@{ P = 3; T = "script not found:$sp" }) }
   }
   $pts = Sum-Reasons $reasons
   $isMs = ($trust -and $trust.IsMs)
@@ -499,7 +499,7 @@ function Test-Autorun($Source, $Name, $Cmd, $Category) {
   }
 }
 
-Write-Step 'Проверяю автозагрузку (реестр, папки Startup)...'
+Write-Step 'Checking autostart (registry, Startup folders)...'
 $runKeys = @(
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
@@ -511,7 +511,7 @@ foreach ($k in $runKeys) {
   if (-not $props) { continue }
   foreach ($pr in $props.PSObject.Properties) {
     if ($pr.Name -match '^PS(Path|ParentPath|ChildName|Drive|Provider)$') { continue }
-    Test-Autorun ($k -replace '^HKLM:\\SOFTWARE\\', 'HKLM\' -replace '^HKCU:\\SOFTWARE\\', 'HKCU\') $pr.Name ([string]$pr.Value) 'Автозапуск'
+    Test-Autorun ($k -replace '^HKLM:\\SOFTWARE\\', 'HKLM\' -replace '^HKCU:\\SOFTWARE\\', 'HKCU\') $pr.Name ([string]$pr.Value) 'Autostart'
   }
 }
 $wsh = New-Object -ComObject WScript.Shell
@@ -520,33 +520,33 @@ foreach ($sf in @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup", 
     if ($f.Name -ieq 'desktop.ini') { continue }
     if ($f.Extension -ieq '.lnk') {
       $lnk = $wsh.CreateShortcut($f.FullName)
-      Test-Autorun 'Папка Startup' $f.Name ("`"$($lnk.TargetPath)`" $($lnk.Arguments)") 'Автозапуск'
+      Test-Autorun 'Startup folder' $f.Name ("`"$($lnk.TargetPath)`" $($lnk.Arguments)") 'Autostart'
     } else {
-      Test-Autorun 'Папка Startup' $f.Name ("`"$($f.FullName)`"") 'Автозапуск'
+      Test-Autorun 'Startup folder' $f.Name ("`"$($f.FullName)`"") 'Autostart'
     }
   }
 }
 
-Write-Step 'Проверяю планировщик заданий...'
+Write-Step 'Checking scheduled tasks...'
 foreach ($t in @(Get-ScheduledTask)) {
   $isMsTask = ($t.TaskPath -like '\Microsoft\*')
   foreach ($a in $t.Actions) {
     if (-not $a.Execute) { continue }
     $cmd = ("$($a.Execute) $($a.Arguments)").Trim()
-    $src = "Задание $($t.TaskPath)$($t.TaskName)"
+    $src = "Task $($t.TaskPath)$($t.TaskName)"
     if ($isMsTask) {
-      # у системных заданий проверяем только то, что они не ведут за пределы Windows
+      # for system tasks we only check that they do not point outside Windows
       $pth = Get-ExePathFromCommand ([Environment]::ExpandEnvironmentVariables($cmd))
       if ($pth -and $pth.ToLower().StartsWith($winDir)) { continue }
     }
-    Test-Autorun $src $t.TaskName $cmd 'Планировщик'
+    Test-Autorun $src $t.TaskName $cmd 'Scheduler'
     if (-not $isMsTask -and $t.Settings.Hidden) {
-      Add-Finding 2 'Планировщик' "$src (скрытое задание)" @('задание помечено как скрытое (Hidden)') $cmd ''
+      Add-Finding 2 'Scheduler' "$src (hidden task)" @('the task is flagged as hidden (Hidden)') $cmd ''
     }
   }
 }
 
-Write-Step 'Проверяю службы (в т.ч. DLL внутри svchost)...'
+Write-Step 'Checking services (including DLLs inside svchost)...'
 $ServiceRows = New-Object System.Collections.Generic.List[object]
 foreach ($s in @(Get-CimInstance Win32_Service)) {
   $cmd = [string]$s.PathName
@@ -563,7 +563,7 @@ foreach ($s in @(Get-CimInstance Win32_Service)) {
   foreach ($x in (Get-PathReasons $target -Stale)) { $reasons.Add($x) }
   foreach ($x in (Get-CmdReasons $cmd)) { $reasons.Add($x) }
   if ($cmd -notmatch '^"' -and $cmd -match '^[A-Za-z]:\\[^"]*\s[^"]*\.exe' -and $cmd -notmatch '^[A-Za-z]:\\.*?\.exe\s*(-|/|$)') {
-    $reasons.Add(@{ P = 1; T = 'путь к службе с пробелами без кавычек (уязвимость повышения прав)' })
+    $reasons.Add(@{ P = 1; T = 'service path with spaces and no quotes (privilege-escalation weakness)' })
   }
   $trust = Get-FileTrust $target
   $pts = Sum-Reasons $reasons
@@ -571,66 +571,66 @@ foreach ($s in @(Get-CimInstance Win32_Service)) {
     $ServiceRows.Add([pscustomobject]@{ Name = $s.Name; Display = $s.DisplayName; State = $s.State; Mode = $s.StartMode; Target = $target; Signer = $trust.Signer; Status = $trust.Status; Points = $pts })
   }
   if ($pts -ge 2) {
-    Add-Finding $pts 'Служба' "Служба $($s.Name) ($($s.DisplayName))" (Uniq-Texts $reasons) "$target`n$cmd" $(if ($trust) { $trust.Hash } else { '' })
+    Add-Finding $pts 'Service' "Service $($s.Name) ($($s.DisplayName))" (Uniq-Texts $reasons) "$target`n$cmd" $(if ($trust) { $trust.Hash } else { '' })
   }
 }
 
-# ---------------------------------------------------------------- 3. реестр, WMI, защита
-Write-Step 'Проверяю WMI-подписки, Winlogon, IFEO, AppInit, Defender, hosts, прокси...'
+# ---------------------------------------------------------------- 3. registry, WMI, protection
+Write-Step 'Checking WMI subscriptions, Winlogon, IFEO, AppInit, Defender, hosts, proxy...'
 foreach ($c in @(Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer)) {
   if ($c.CimClass.CimClassName -eq 'NTEventLogEventConsumer') { continue }
   $body = "$($c.CommandLineTemplate) $($c.ExecutablePath) $($c.ScriptText)".Trim()
-  if ($body.Length -gt 400) { $body = $body.Substring(0, 400) + '…' }
-  Add-Finding 7 'WMI' "WMI-подписка: $($c.Name) [$($c.CimClass.CimClassName)]" @('постоянная WMI-подписка выполняет команды сама — любимый способ спрятать автозапуск; у обычных программ встречается редко') $body ''
+  if ($body.Length -gt 400) { $body = $body.Substring(0, 400) + '...' }
+  Add-Finding 7 'WMI' "WMI subscription:$($c.Name) [$($c.CimClass.CimClassName)]" @('a permanent WMI subscription runs commands on its own - a favorite way to hide autostart; rare in ordinary programs') $body ''
 }
 $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $wlp = Get-ItemProperty $wl
-if ($wlp.Shell -and $wlp.Shell -ne 'explorer.exe') { Add-Finding 8 'Реестр' 'Winlogon: изменена оболочка (Shell)' @('вместо explorer.exe при входе запускается другое') ([string]$wlp.Shell) '' }
-if ($wlp.Userinit -and $wlp.Userinit -notmatch '(?i)^c:\\windows\\system32\\userinit\.exe,?$') { Add-Finding 8 'Реестр' 'Winlogon: изменён Userinit' @('при входе в систему вместе с userinit.exe запускается что-то ещё') ([string]$wlp.Userinit) '' }
+if ($wlp.Shell -and $wlp.Shell -ne 'explorer.exe') { Add-Finding 8 'Registry' 'Winlogon: the shell (Shell) was changed' @('something other than explorer.exe starts at sign-in') ([string]$wlp.Shell) '' }
+if ($wlp.Userinit -and $wlp.Userinit -notmatch '(?i)^c:\\windows\\system32\\userinit\.exe,?$') { Add-Finding 8 'Registry' 'Winlogon: Userinit was changed' @('something else starts alongside userinit.exe at sign-in') ([string]$wlp.Userinit) '' }
 $hs = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').Shell
-if ($hs) { Add-Finding 8 'Реестр' 'Winlogon (HKCU): задана пользовательская оболочка' @('такого у обычной Windows не бывает') ([string]$hs) '' }
+if ($hs) { Add-Finding 8 'Registry' 'Winlogon (HKCU): a custom shell is set' @('a normal Windows installation never has this') ([string]$hs) '' }
 foreach ($k in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options')) {
   $dbg = (Get-ItemProperty $k.PSPath).Debugger
-  if ($dbg) { Add-Finding 6 'Реестр' "IFEO: $($k.PSChildName) перехватывается отладчиком" @('вместо программы запускается другая (Image File Execution Options). Легально так подменяют диспетчер задач, но малварь тоже так закрепляется') ([string]$dbg) '' }
+  if ($dbg) { Add-Finding 6 'Registry' "IFEO: $($k.PSChildName) is hijacked by a debugger" @('another program runs instead (Image File Execution Options). Task Manager replacements legitimately do this, but malware persists this way too') ([string]$dbg) '' }
 }
 $aw = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows'
-if ($aw.AppInit_DLLs -and $aw.LoadAppInit_DLLs -eq 1) { Add-Finding 6 'Реестр' 'AppInit_DLLs: DLL внедряется во все программы' @('библиотека подгружается в каждый процесс с интерфейсом') ([string]$aw.AppInit_DLLs) '' }
+if ($aw.AppInit_DLLs -and $aw.LoadAppInit_DLLs -eq 1) { Add-Finding 6 'Registry' 'AppInit_DLLs: a DLL is injected into every program' @('the library is loaded into every process that has a UI') ([string]$aw.AppInit_DLLs) '' }
 
 $mp = Get-MpPreference
 if ($mp) {
-  foreach ($e in @($mp.ExclusionPath)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Защита' "Исключение Defender (путь): $e" @('в этой папке Defender ничего не проверяет. Майнеры любят добавлять такие исключения; у разработчиков они тоже бывают — вспомните, добавляли ли вы это') $e '' } }
-  foreach ($e in @($mp.ExclusionProcess)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Защита' "Исключение Defender (процесс): $e" @('этот процесс Defender не проверяет') $e '' } }
-  foreach ($e in @($mp.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 2 'Защита' "Исключение Defender (расширение): $e" @('файлы с таким расширением Defender не проверяет') $e '' } }
-  if (-not $isAdmin) { Add-Finding 0 'Защита' 'Исключения Defender без прав администратора не видны' @('') '' '' }
+  foreach ($e in @($mp.ExclusionPath)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (path):$e" @('Defender scans nothing in this folder. Miners like adding such exclusions; developers have them too - think whether you added this one') $e '' } }
+  foreach ($e in @($mp.ExclusionProcess)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (process):$e" @('Defender does not scan this process') $e '' } }
+  foreach ($e in @($mp.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 2 'Protection' "Defender exclusion (extension):$e" @('Defender does not scan files with this extension') $e '' } }
+  if (-not $isAdmin) { Add-Finding 0 'Protection' 'Defender exclusions are not visible without administrator rights' @('') '' '' }
 }
 $ms = Get-MpComputerStatus
 $otherAv = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { $_.displayName -notmatch '^(Windows|Microsoft) Defender' } | ForEach-Object { $_.displayName })
-if ($ms -and -not $ms.RealTimeProtectionEnabled -and $otherAv.Count -eq 0) { Add-Finding 5 'Защита' 'Защита в реальном времени Defender выключена, другого антивируса не найдено' @('малварь часто выключает Defender в первую очередь — включите защиту в «Безопасности Windows»') '' '' }
-elseif ($otherAv.Count -eq 0 -and -not $ms) { Add-Finding 3 'Защита' 'Не удалось найти работающий антивирус' @('Windows не сообщает ни об одном антивирусе') '' '' }
+if ($ms -and -not $ms.RealTimeProtectionEnabled -and $otherAv.Count -eq 0) { Add-Finding 5 'Protection' 'Defender real-time protection is off and no other antivirus was found' @('malware often disables Defender first - turn protection back on in Windows Security') '' '' }
+elseif ($otherAv.Count -eq 0 -and -not $ms) { Add-Finding 3 'Protection' 'No working antivirus was found' @('Windows reports no antivirus product') '' '' }
 
 $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
 $hostLines = @(Get-Content $hostsFile | Where-Object { $_ -and $_ -notmatch '^\s*#' -and $_ -notmatch '(?i)\blocalhost\b' })
 if ($hostLines.Count -gt 0 -and $hostLines.Count -le 60) {
   foreach ($l in $hostLines) {
-    if ($l -match $AvDomainRx) { Add-Finding 5 'Сеть' 'Файл hosts блокирует/перенаправляет сайт антивируса или обновлений' @('так малварь мешает обновлять защиту') $l '' }
-    else { Add-Finding 2 'Сеть' 'Нестандартная запись в hosts' @('запись перенаправляет домен на другой адрес — проверьте, что вы её добавляли сами') $l '' }
+    if ($l -match $AvDomainRx) { Add-Finding 5 'Network' 'The hosts file blocks/redirects an antivirus or update site' @('malware does this to stop protection from updating') $l '' }
+    else { Add-Finding 2 'Network' 'Non-standard hosts entry' @('the entry redirects a domain to another address - make sure you added it yourself') $l '' }
   }
 } elseif ($hostLines.Count -gt 60) {
-  Add-Finding 2 'Сеть' "В hosts $($hostLines.Count) записей" @('похоже на блок-лист рекламы; если вы такого не ставили — проверьте файл') $hostsFile ''
+  Add-Finding 2 'Network' "The hosts file has $($hostLines.Count) entries" @('looks like an ad block list; if you did not install one, check the file') $hostsFile ''
 }
 $is = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-if ($is.ProxyEnable -eq 1 -and $is.ProxyServer) { Add-Finding 3 'Сеть' "Включён системный прокси: $($is.ProxyServer)" @('весь веб-трафик идёт через указанный сервер. Если вы не настраивали прокси/VPN — это повод насторожиться') ([string]$is.ProxyServer) '' }
-if ($is.AutoConfigURL) { Add-Finding 3 'Сеть' "Задан скрипт автонастройки прокси (PAC)" @('PAC-скрипт может перенаправлять трафик на чужой сервер') ([string]$is.AutoConfigURL) '' }
+if ($is.ProxyEnable -eq 1 -and $is.ProxyServer) { Add-Finding 3 'Network' "System proxy is enabled:$($is.ProxyServer)" @('all web traffic goes through the specified server. If you did not set up a proxy/VPN yourself, treat this with suspicion') ([string]$is.ProxyServer) '' }
+if ($is.AutoConfigURL) { Add-Finding 3 'Network' "A proxy auto-config (PAC) script is set" @('a PAC script can redirect traffic to a foreign server') ([string]$is.AutoConfigURL) '' }
 
 foreach ($u in @(Get-LocalUser)) {
-  if ($u.Name -like '*$') { Add-Finding 5 'Аккаунт' "Скрытый по имени локальный пользователь (имя оканчивается на знак доллара): $($u.Name)" @('такое имя скрывает аккаунт от части списков') $u.Name '' }
+  if ($u.Name -like '*$') { Add-Finding 5 'Account' "Local user hidden by name (the name ends with a dollar sign):$($u.Name)" @('such a name hides the account from some listings') $u.Name '' }
 }
 $admins = @(Get-LocalGroupMember -Group 'Administrators' | ForEach-Object { $_.Name })
 
-# ---------------------------------------------------------------- 4. камера, микрофон, экран, геолокация
-Write-Step 'Читаю журнал доступа к камере, микрофону, экрану...'
+# ---------------------------------------------------------------- 4. camera, microphone, screen, location
+Write-Step 'Reading the camera, microphone and screen access log...'
 $Consents = New-Object System.Collections.Generic.List[object]
-$capNames = [ordered]@{ webcam = 'Камера'; microphone = 'Микрофон'; location = 'Геолокация'; graphicsCaptureProgrammatic = 'Захват экрана'; graphicsCaptureWithoutBorder = 'Захват экрана (без рамки)' }
+$capNames = [ordered]@{ webcam = 'Camera'; microphone = 'Microphone'; location = 'Location'; graphicsCaptureProgrammatic = 'Screen capture'; graphicsCaptureWithoutBorder = 'Screen capture (borderless)' }
 $consentBase = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
 function Add-Consent($cap, $key, $nonPackaged) {
   $pr = Get-ItemProperty $key.PSPath
@@ -659,27 +659,27 @@ foreach ($c in $Consents) {
   if (-not $t -or -not $t.Exists) { }
   else {
     foreach ($x in (Get-PathReasons $c.App)) { $reasons.Add($x) }
-    if ($t.Status -ne 'Valid' -and $recent) { $reasons.Add(@{ P = 2; T = "неподписанная программа использовала: $($c.Cap.ToLower()) (последний раз $($c.Start.ToString('dd.MM.yyyy HH:mm')))" }) }
+    if ($t.Status -ne 'Valid' -and $recent) { $reasons.Add(@{ P = 2; T = "an unsigned program used:$($c.Cap.ToLower()) (last time$($c.Start.ToString('yyyy-MM-dd HH:mm')))" }) }
   }
-  if ($c.InUse -and $t -and $t.Status -ne 'Valid') { $reasons.Add(@{ P = 3; T = "ПРЯМО СЕЙЧАС использует: $($c.Cap.ToLower())" }) }
+  if ($c.InUse -and $t -and $t.Status -ne 'Valid') { $reasons.Add(@{ P = 3; T = "USING RIGHT NOW:$($c.Cap.ToLower())" }) }
   $pts = Sum-Reasons $reasons
-  if ($pts -ge 3) { Add-Finding $pts 'Камера/микрофон' "$($c.Cap): $([IO.Path]::GetFileName($c.App))" (Uniq-Texts $reasons) $c.App $(if ($t) { $t.Hash } else { '' }) }
+  if ($pts -ge 3) { Add-Finding $pts 'Camera/Mic' "$($c.Cap): $([IO.Path]::GetFileName($c.App))" (Uniq-Texts $reasons) $c.App $(if ($t) { $t.Hash } else { '' }) }
 }
 
-# ---------------------------------------------------------------- 5. установленные программы
-Write-Step 'Просматриваю список установленных программ...'
+# ---------------------------------------------------------------- 5. installed programs
+Write-Step 'Reviewing installed programs...'
 $Programs = @()
 foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
   $Programs += @(Get-ItemProperty $k | Where-Object { $_.DisplayName })
 }
 foreach ($pg in $Programs) {
-  if ($pg.DisplayName -match $SpyRx) { Add-Finding 6 'Программа' "Установлена программа слежения: $($pg.DisplayName)" @('название совпадает с известным кейлоггером / программой мониторинга. Если вы её не ставили — это почти наверняка то, что вы ищете') "$($pg.InstallLocation) $($pg.Publisher)" '' }
-  elseif ($pg.DisplayName -match $RatRx) { Add-Finding 4 'Программа' "Установлена программа удалённого доступа: $($pg.DisplayName)" @('через такие программы кто-то может видеть и управлять компьютером. Если не ставили сами — удалите') "$($pg.InstallLocation) $($pg.Publisher)" '' }
-  elseif ($pg.DisplayName -match $MinerNames) { Add-Finding 8 'Программа' "Установлен майнер: $($pg.DisplayName)" @('название совпадает с известным майнером') "$($pg.InstallLocation)" '' }
+  if ($pg.DisplayName -match $SpyRx) { Add-Finding 6 'Program' "Monitoring program installed:$($pg.DisplayName)" @('the name matches a known keylogger / monitoring program. If you did not install it, this is very likely what you are looking for') "$($pg.InstallLocation) $($pg.Publisher)" '' }
+  elseif ($pg.DisplayName -match $RatRx) { Add-Finding 4 'Program' "Remote-access program installed:$($pg.DisplayName)" @('such programs let someone view and control the computer. If you did not install it yourself, remove it') "$($pg.InstallLocation) $($pg.Publisher)" '' }
+  elseif ($pg.DisplayName -match $MinerNames) { Add-Finding 8 'Program' "Miner installed:$($pg.DisplayName)" @('the name matches a known miner') "$($pg.InstallLocation)" '' }
 }
 
-# ---------------------------------------------------------------- 6. расширения браузеров
-Write-Step 'Просматриваю расширения Chrome / Edge / Brave...'
+# ---------------------------------------------------------------- 6. browser extensions
+Write-Step 'Reviewing Chrome / Edge / Brave extensions...'
 $Exts = New-Object System.Collections.Generic.List[object]
 $browsers = [ordered]@{ Chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"; Edge = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"; Brave = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" }
 $sensitive = 'webRequest', 'webRequestBlocking', 'cookies', 'history', 'clipboardRead', 'debugger', 'proxy', 'nativeMessaging', 'management'
@@ -708,29 +708,29 @@ foreach ($bn in $browsers.Keys) {
       $sens = @($perms | Where-Object { $_ -in $sensitive })
       $sideload = -not $m.update_url
       $pts = 0; $why = @()
-      if ($broad) { $pts += 1; $why += 'доступ ко всем сайтам' }
-      if ($sens.Count -ge 2) { $pts += 1; $why += "чувствительные права: $($sens -join ', ')" }
-      if ($sideload) { $pts += 2; $why += 'нет адреса обновления — установлено не из магазина (вручную / программой)' }
+      if ($broad) { $pts += 1; $why += 'access to all websites' }
+      if ($sens.Count -ge 2) { $pts += 1; $why += "sensitive permissions:$($sens -join ', ')" }
+      if ($sideload) { $pts += 2; $why += 'no update URL - not installed from a store (manually or by a program)' }
       $Exts.Add([pscustomobject]@{ Browser = $bn; Profile = $prof.Name; Id = $ed.Name; Name = $nm; Version = $m.version; Broad = $broad; Sens = ($sens -join ', '); Sideload = $sideload; Points = $pts })
-      if ($pts -ge 3) { Add-Finding $pts 'Расширение' "$bn`: $nm" $why "id: $($ed.Name)  ($($prof.Name))" '' }
+      if ($pts -ge 3) { Add-Finding $pts 'Extension' "$bn`: $nm" $why "id: $($ed.Name)  ($($prof.Name))" '' }
     }
   }
 }
 
-# ---------------------------------------------------------------- 7. поиск файлов (опционально)
+# ---------------------------------------------------------------- 7. file search (optional)
 if ($DeepFiles) {
-  Write-Step 'Ищу файлы майнеров по именам в пользовательских папках (долго)...'
+  Write-Step 'Searching user folders for miner files by name (slow)...'
   $roots = @($env:TEMP, "$env:LOCALAPPDATA", "$env:APPDATA", $env:ProgramData, "$env:PUBLIC", "$env:USERPROFILE\Downloads")
   foreach ($f in @(Get-ChildItem -Path $roots -Recurse -Depth 4 -File -Force | Where-Object { $_.Name -match $MinerNames -or $_.Name -match '(?i)^(config|pools?)\.json$' -and (Select-String -Path $_.FullName -Pattern 'stratum|"pools"|donate-level' -Quiet) })) {
-    Add-Finding 7 'Файл' "Файл, похожий на майнер: $($f.Name)" @('имя или содержимое указывает на майнер') $f.FullName ''
+    Add-Finding 7 'File' "File that looks like a miner:$($f.Name)" @('the name or contents point to a miner') $f.FullName ''
   }
 }
 
-# ---------------------------------------------------------------- 8. издатели подписей (поиск «краденых» / подозрительных сертификатов)
-Write-Step 'Анализирую издателей цифровых подписей...'
+# ---------------------------------------------------------------- 8. signature publishers (hunting for stolen / suspicious certificates)
+Write-Step 'Analyzing digital signature publishers...'
 function Get-NameToken($s) {
   $stop = 'inc', 'llc', 'ltd', 'corp', 'corporation', 'co', 'gmbh', 'the', 'pbc', 'limited', 'sa', 'ooo', 'ag', 'srl', 'bv', 'oy', 'ab', 'company', 'technologies', 'technology', 'software'
-  $w = ($s.ToLower() -replace '[^a-z0-9Ѐ-ӿ ]', ' ') -split '\s+' | Where-Object { $_ -and $_ -notin $stop }
+  $w = ($s.ToLower() -replace '[^a-z0-9\u0400-\u04FF ]', ' ') -split '\s+' | Where-Object { $_ -and $_ -notin $stop }
   return ($w | Select-Object -First 1)
 }
 $SignerRows = @{}
@@ -739,23 +739,23 @@ foreach ($t in @($FileCache.Values)) {
   if (-not $SignerRows.ContainsKey($t.Signer)) { $SignerRows[$t.Signer] = [pscustomobject]@{ Signer = $t.Signer; Files = 0; Issued = $t.NotBefore; Example = $t.Path } }
   $SignerRows[$t.Signer].Files++
   if ($t.NotBefore -and $SignerRows[$t.Signer].Issued -and $t.NotBefore -gt $SignerRows[$t.Signer].Issued) { $SignerRows[$t.Signer].Issued = $t.NotBefore }
-  # подпись одного издателя, а в свойствах файла указан другой — классический признак подделки/чужого сертификата
+  # signed by one publisher while the file properties name another - a classic sign of a forged or stolen certificate
   $loc = Get-LocationReason $t.Path
   if ($t.Company -and $loc -and $loc.P -ge 2 -and $t.Path -notmatch '\\WindowsApps\\') {
     $tok1 = Get-NameToken $t.Signer; $tok2 = Get-NameToken $t.Company
     if ($tok1 -and $tok2 -and ($t.Signer.ToLower() -notlike "*$tok2*") -and ($t.Company.ToLower() -notlike "*$tok1*")) {
-      Add-Finding 3 'Подпись' "Подписан «$($t.Signer)», но в свойствах файла компания «$($t.Company)»" @('издатель подписи и заявленный производитель не совпадают, а файл лежит в пользовательской папке — так бывает у упакованных чужих программ и у файлов, подписанных не своим сертификатом') $t.Path $t.Hash
+      Add-Finding 3 'Signature' "Signed by '$($t.Signer)' but the file properties name the company '$($t.Company)'" @('the signing publisher and the declared vendor differ and the file sits in a user-writable folder - typical for repackaged third-party programs and for files signed with a certificate that is not theirs') $t.Path $t.Hash
     }
   }
 }
 
-# ---------------------------------------------------------------- 9. репутация по VirusTotal (по желанию, отправляются только хэши)
+# ---------------------------------------------------------------- 9. VirusTotal reputation (optional, only hashes are sent)
 $VtRows = New-Object System.Collections.Generic.List[object]
 if ($UseVirusTotal) {
   $vtKey = $env:VT_API_KEY
-  if (-not $vtKey) { Write-Host '[!] Для -UseVirusTotal задайте ключ в переменной окружения VT_API_KEY (бесплатный ключ: virustotal.com → профиль → API key). Пропускаю.' -ForegroundColor Yellow }
+  if (-not $vtKey) { Write-Host '[!] For -UseVirusTotal set your key in the VT_API_KEY environment variable (free key: virustotal.com -> profile -> API key). Skipping.' -ForegroundColor Yellow }
   else {
-    Write-Step "Сверяю хэши с VirusTotal (до $VtMax штук, ~4 запроса в минуту — это долго)..."
+    Write-Step "Checking hashes against VirusTotal (up to $VtMax files, about 4 requests per minute - this is slow)..."
     $prio = New-Object System.Collections.Generic.List[string]
     foreach ($f in $Findings) { if ($f.Hash -and $f.Hash -notin $prio) { $prio.Add($f.Hash) } }
     foreach ($t in @($FileCache.Values)) {
@@ -768,12 +768,12 @@ if ($UseVirusTotal) {
         $st = $resp.data.attributes.last_analysis_stats
         $VtRows.Add([pscustomobject]@{ Hash = $hs; Malicious = [int]$st.malicious; Suspicious = [int]$st.suspicious; Known = $true; Name = $resp.data.attributes.meaningful_name })
         $path = ($FileCache.Values | Where-Object { $_.Hash -eq $hs } | Select-Object -First 1).Path
-        if ($st.malicious -ge 3) { Add-Finding 9 'VirusTotal' "VirusTotal: $($st.malicious) антивирусов считают файл вредоносным" @("файл $path определяется как вредоносный (malicious: $($st.malicious), suspicious: $($st.suspicious)) — подпись при этом может быть валидной, если сертификат украден") $path $hs }
-        elseif ($st.malicious -ge 1) { Add-Finding 4 'VirusTotal' "VirusTotal: $($st.malicious) срабатывание(й) на файл" @('одно-два срабатывания чаще ложные, но проверьте файл по ссылке с хэшем') $path $hs }
+        if ($st.malicious -ge 3) { Add-Finding 9 'VirusTotal' "VirusTotal: $($st.malicious) engines flag this file as malicious" @("the file $path is detected as malicious (malicious: $($st.malicious), suspicious: $($st.suspicious)) - the signature can still be valid if the certificate was stolen") $path $hs }
+        elseif ($st.malicious -ge 1) { Add-Finding 4 'VirusTotal' "VirusTotal: $($st.malicious) detection(s) on this file" @('one or two detections are usually false positives, but check the file via the hash link') $path $hs }
       } catch {
         $code = $_.Exception.Response.StatusCode.value__
         if ($code -eq 404) { $VtRows.Add([pscustomobject]@{ Hash = $hs; Malicious = 0; Suspicious = 0; Known = $false; Name = '' }) }
-        elseif ($code -eq 401 -or $code -eq 403) { Write-Host '[!] VirusTotal отклонил ключ — останавливаю проверку.' -ForegroundColor Yellow; break }
+        elseif ($code -eq 401 -or $code -eq 403) { Write-Host '[!] VirusTotal rejected the key - stopping the check.' -ForegroundColor Yellow; break }
         elseif ($code -eq 429) { Start-Sleep -Seconds 60 }
       }
       $done++
@@ -782,8 +782,8 @@ if ($UseVirusTotal) {
   }
 }
 
-# ---------------------------------------------------------------- отчёт
-Write-Step 'Формирую отчёт...'
+# ---------------------------------------------------------------- report
+Write-Step 'Building the report...'
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $reportPath = Join-Path $OutDir "report-$stamp.html"
@@ -794,7 +794,7 @@ $cLow = @($sorted | Where-Object { $_.Points -lt 4 }).Count
 
 $sb = New-Object System.Text.StringBuilder
 function A($s) { [void]$sb.AppendLine($s) }
-A '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Отчёт: скрытые программы</title><style>'
+A '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Report: hidden programs</title><style>'
 A ':root{--bg:#fff;--fg:#1c1f24;--mut:#667085;--card:#f6f7f9;--line:#e3e6eb;--high:#d92d20;--med:#dc6803;--low:#b69300;--info:#667085;--ok:#079455}'
 A '@media(prefers-color-scheme:dark){:root{--bg:#14161a;--fg:#e6e8ec;--mut:#98a2b3;--card:#1c1f25;--line:#2c313a;--high:#f97066;--med:#fdb022;--low:#e5c94a;--info:#98a2b3;--ok:#47cd89}}'
 A 'body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,sans-serif}main{max-width:1100px;margin:0 auto;padding:24px 16px 64px}'
@@ -806,87 +806,87 @@ A '.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;bo
 A '.f ul{margin:6px 0 6px 18px;padding:0}code,pre{font:12.5px/1.45 ui-monospace,Consolas,monospace}pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0 0;white-space:pre-wrap;word-break:break-all}'
 A 'table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600}td.p{font:12px ui-monospace,Consolas,monospace;word-break:break-all}'
 A '.tw{overflow-x:auto}a{color:inherit}.note{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}</style></head><body><main>'
-A "<h1>Отчёт: скрытые и замаскированные программы</h1><div class='mut'>$(Esc $env:COMPUTERNAME) · $(Get-Date -Format 'dd.MM.yyyy HH:mm') · $(if($isAdmin){'запущено от администратора'}else{'<b>без прав администратора — отчёт неполный</b>'})</div>"
-A "<div class='sum'><div class='pill'><b style='color:var(--high)'>$cHigh</b>высокий риск</div><div class='pill'><b style='color:var(--med)'>$cMed</b>средний</div><div class='pill'><b style='color:var(--low)'>$cLow</b>низкий</div><div class='pill'><b>$($groups.Count)</b>программ запущено</div><div class='pill'><b>$($Autoruns.Count)</b>записей автозапуска</div></div>"
-A "<div class='note'><b>Как читать.</b> Это не антивирус и не вердикт: сканер показывает <i>признаки</i> (подпись, место запуска, поведение, закрепление в системе). Много обычных программ неподписаны или лежат в AppData — смотрите на причины в каждой карточке и на то, узнаёте ли вы программу. Ничего не удалялось и не отправлялось: чтобы проверить файл на VirusTotal, нажмите ссылку у хэша (уйдёт только хэш, не файл).</div>"
+A "<h1>Report: hidden and masquerading programs</h1><div class='mut'>$(Esc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm') | $(if($isAdmin){'run as administrator'}else{'<b>without administrator rights - the report is incomplete</b>'})</div>"
+A "<div class='sum'><div class='pill'><b style='color:var(--high)'>$cHigh</b>high risk</div><div class='pill'><b style='color:var(--med)'>$cMed</b>medium</div><div class='pill'><b style='color:var(--low)'>$cLow</b>low</div><div class='pill'><b>$($groups.Count)</b>programs running</div><div class='pill'><b>$($Autoruns.Count)</b>autostart entries</div></div>"
+A "<div class='note'><b>How to read this.</b> This is not an antivirus and not a verdict: the scanner shows <i>indicators</i> (signature, launch location, behavior, persistence). Many ordinary programs are unsigned or live in AppData - look at the reasons in each card and at whether you recognize the program. Nothing was deleted or uploaded: to check a file on VirusTotal, click the link next to its hash (only the hash is sent, not the file).</div>"
 
-A '<h2>Что найдено</h2>'
-if ($sorted.Count -eq 0) { A "<p style='color:var(--ok)'><b>Явных признаков не найдено.</b> Это не гарантия: см. раздел «Чего сканер не видит» внизу.</p>" }
+A '<h2>Findings</h2>'
+if ($sorted.Count -eq 0) { A "<p style='color:var(--ok)'><b>No obvious indicators found.</b> This is not a guarantee: see "What the scanner cannot see" below.</p>" }
 foreach ($f in $sorted) {
   $cl = Get-SevClass $f.Points
   A "<div class='f $cl'><span class='badge b-$cl'>$(Get-SevName $f.Points)</span><span class='mut'>$(Esc $f.Category)</span> <b>$(Esc $f.Title)</b><ul>"
   foreach ($r in $f.Reasons) { if ($r) { A "<li>$(Esc $r)</li>" } }
   A '</ul>'
   if ($f.Target) { A "<pre>$(Esc $f.Target)</pre>" }
-  if ($f.Hash) { A "<div class='mut' style='margin-top:6px;font-size:12px'>SHA256: <code>$($f.Hash)</code> · <a href='https://www.virustotal.com/gui/file/$($f.Hash)' target='_blank' rel='noopener'>проверить на VirusTotal</a></div>" }
+  if ($f.Hash) { A "<div class='mut' style='margin-top:6px;font-size:12px'>SHA256: <code>$($f.Hash)</code> | <a href='https://www.virustotal.com/gui/file/$($f.Hash)' target='_blank' rel='noopener'>check on VirusTotal</a></div>" }
   A '</div>'
 }
 
-A '<h2>Самые нагруженные программы (CPU / GPU за время замера)</h2><div class="tw"><table><tr><th>Программа</th><th>Экз.</th><th>CPU, %</th><th>GPU, %</th><th>Подпись</th><th>Путь</th></tr>'
+A '<h2>Heaviest programs (CPU / GPU during sampling)</h2><div class="tw"><table><tr><th>Program</th><th>Instances</th><th>CPU, %</th><th>GPU, %</th><th>Signer</th><th>Path</th></tr>'
 foreach ($t in ($TopLoad | Sort-Object { $_.Cpu + $_.Gpu } -Descending | Select-Object -First 12)) {
   A "<tr><td>$(Esc $t.Name)</td><td>$($t.Count)</td><td>$($t.Cpu)</td><td>$($t.Gpu)</td><td>$(Esc $t.Signer)</td><td class='p'>$(Esc $t.Path)</td></tr>"
 }
-A '</table></div><p class="mut">Процент — от суммарной мощности всех ядер. Майнер обычно держит постоянные 30–100% на неизвестной программе, даже когда вы ничего не делаете.</p>'
+A '</table></div><p class="mut">Percent of the combined power of all cores. A miner usually keeps a steady 30-100% on an unfamiliar program even when you are doing nothing.</p>'
 
-A '<h2>Кто ходит в интернет</h2><div class="tw"><table><tr><th>Программа</th><th>PID</th><th>Куда</th><th>Подпись</th><th>Путь</th></tr>'
+A '<h2>Who talks to the internet</h2><div class="tw"><table><tr><th>Program</th><th>PID</th><th>To</th><th>Signer</th><th>Path</th></tr>'
 foreach ($n in ($NetRows | Sort-Object @{ Expression = { $_.Status -eq 'Valid' } }, Process | Select-Object -First 250)) {
-  A "<tr><td>$(Esc $n.Process)</td><td>$($n.ProcId)</td><td>$(Esc $n.Remote):$($n.Port)</td><td>$(Esc $(if($n.Signer){$n.Signer}else{'— нет —'}))</td><td class='p'>$(Esc $n.Path)</td></tr>"
+  A "<tr><td>$(Esc $n.Process)</td><td>$($n.ProcId)</td><td>$(Esc $n.Remote):$($n.Port)</td><td>$(Esc $(if($n.Signer){$n.Signer}else{'- none -'}))</td><td class='p'>$(Esc $n.Path)</td></tr>"
 }
-A '</table></div><p class="mut">Сверху — программы без действительной подписи. Для неизвестного IP можно посмотреть владельца на who.is / ipinfo.io.</p>'
+A '</table></div><p class="mut">Programs without a valid signature come first. For an unknown IP you can look up the owner on who.is / ipinfo.io.</p>'
 
-A '<h2>Доступ к камере, микрофону, экрану, геолокации</h2><div class="tw"><table><tr><th>Что</th><th>Программа</th><th>Последний раз</th><th>Сейчас</th></tr>'
+A '<h2>Camera, microphone, screen and location access</h2><div class="tw"><table><tr><th>What</th><th>Program</th><th>Last used</th><th>Now</th></tr>'
 foreach ($c in ($Consents | Sort-Object Start -Descending | Select-Object -First 60)) {
-  A "<tr><td>$(Esc $c.Cap)</td><td class='p'>$(Esc $c.App)</td><td>$($c.Start.ToString('dd.MM.yyyy HH:mm'))</td><td>$(if($c.InUse){'<b style=""color:var(--med)"">используется</b>'}else{'—'})</td></tr>"
+  A "<tr><td>$(Esc $c.Cap)</td><td class='p'>$(Esc $c.App)</td><td>$($c.Start.ToString('yyyy-MM-dd HH:mm'))</td><td>$(if($c.InUse){'<b style=""color:var(--med)"">in use</b>'}else{'-'})</td></tr>"
 }
-A '</table></div><p class="mut">Это журнал самой Windows. Незнакомая программа в списке камеры/микрофона — главный признак шпионажа.</p>'
+A '</table></div><p class="mut">This log is kept by Windows itself. An unfamiliar program in the camera/microphone list is the main sign of spying.</p>'
 
-A '<h2>Автозапуск, задания и службы не от Microsoft</h2><div class="tw"><table><tr><th>Где</th><th>Имя</th><th>Команда</th><th>Подпись</th></tr>'
+A '<h2>Autostart entries, tasks and services not from Microsoft</h2><div class="tw"><table><tr><th>Where</th><th>Name</th><th>Command</th><th>Signer</th></tr>'
 foreach ($a in ($Autoruns | Where-Object { -not $_.IsMs } | Sort-Object Points -Descending | Select-Object -First 200)) {
   A "<tr><td>$(Esc $a.Source)</td><td>$(Esc $a.Name)</td><td class='p'>$(Esc $a.Command)</td><td>$(Esc $(if($a.Signer){$a.Signer}else{$a.Status}))</td></tr>"
 }
 foreach ($s in ($ServiceRows | Sort-Object Points -Descending)) {
-  A "<tr><td>Служба ($(Esc $s.State), $(Esc $s.Mode))</td><td>$(Esc $s.Name)</td><td class='p'>$(Esc $s.Target)</td><td>$(Esc $(if($s.Signer){$s.Signer}else{$s.Status}))</td></tr>"
+  A "<tr><td>Service ($(Esc $s.State), $(Esc $s.Mode))</td><td>$(Esc $s.Name)</td><td class='p'>$(Esc $s.Target)</td><td>$(Esc $(if($s.Signer){$s.Signer}else{$s.Status}))</td></tr>"
 }
 A '</table></div>'
 
 if ($Exts.Count -gt 0) {
-  A '<h2>Расширения браузеров с широкими правами</h2><div class="tw"><table><tr><th>Браузер</th><th>Название</th><th>Все сайты</th><th>Чувствительные права</th><th>Не из магазина</th><th>ID</th></tr>'
+  A '<h2>Browser extensions with broad permissions</h2><div class="tw"><table><tr><th>Browser</th><th>Name</th><th>All sites</th><th>Sensitive permissions</th><th>Sideloaded</th><th>ID</th></tr>'
   foreach ($e in ($Exts | Where-Object { $_.Points -ge 1 } | Sort-Object Points -Descending)) {
-    A "<tr><td>$(Esc $e.Browser) / $(Esc $e.Profile)</td><td>$(Esc $e.Name)</td><td>$(if($e.Broad){'да'}else{''})</td><td>$(Esc $e.Sens)</td><td>$(if($e.Sideload){'<b>да</b>'}else{''})</td><td class='p'>$(Esc $e.Id)</td></tr>"
+    A "<tr><td>$(Esc $e.Browser) / $(Esc $e.Profile)</td><td>$(Esc $e.Name)</td><td>$(if($e.Broad){'yes'}else{''})</td><td>$(Esc $e.Sens)</td><td>$(if($e.Sideload){'<b>yes</b>'}else{''})</td><td class='p'>$(Esc $e.Id)</td></tr>"
   }
-  A '</table></div><p class="mut">Расширение с доступом ко всем сайтам видит всё, что вы вводите в браузере. Удалите те, которыми не пользуетесь: chrome://extensions или edge://extensions.</p>'
+  A '</table></div><p class="mut">An extension with access to all sites sees everything you type in the browser. Remove the ones you do not use: chrome://extensions or edge://extensions.</p>'
 }
 
 if ($ForeignDlls.Count -gt 0) {
-  A '<h2>Сторонние DLL внутри системных процессов Windows</h2><div class="tw"><table><tr><th>Процесс</th><th>DLL</th><th>Подпись</th></tr>'
+  A '<h2>Third-party DLLs inside Windows system processes</h2><div class="tw"><table><tr><th>Process</th><th>DLL</th><th>Signer</th></tr>'
   foreach ($d in ($ForeignDlls | Sort-Object Signer, Process | Select-Object -First 120)) {
     A "<tr><td>$(Esc $d.Process)</td><td class='p'>$(Esc $d.Dll)</td><td>$(Esc $d.Signer)</td></tr>"
   }
-  A '</table></div><p class="mut">Подписанные сторонние DLL в explorer/svchost обычны (антивирус, драйверы видеокарты, расширения проводника). Смотрите на то, чего вы не узнаёте.</p>'
+  A '</table></div><p class="mut">Signed third-party DLLs in explorer/svchost are common (antivirus, graphics drivers, shell extensions). Look for what you do not recognize.</p>'
 }
 if ($SignerRows.Count -gt 0) {
-  A '<h2>Издатели подписей запущенных и загруженных файлов</h2><div class="tw"><table><tr><th>Издатель</th><th>Файлов</th><th>Сертификат выдан</th><th>Пример</th></tr>'
+  A '<h2>Signature publishers of running and loaded files</h2><div class="tw"><table><tr><th>Publisher</th><th>Files</th><th>Certificate issued</th><th>Example</th></tr>'
   foreach ($s in ($SignerRows.Values | Sort-Object Files | Select-Object -First 80)) {
-    A "<tr><td>$(Esc $s.Signer)</td><td>$($s.Files)</td><td>$(if($s.Issued){$s.Issued.ToString('dd.MM.yyyy')})</td><td class='p'>$(Esc $s.Example)</td></tr>"
+    A "<tr><td>$(Esc $s.Signer)</td><td>$($s.Files)</td><td>$(if($s.Issued){$s.Issued.ToString('yyyy-MM-dd')})</td><td class='p'>$(Esc $s.Example)</td></tr>"
   }
-  A '</table></div><p class="mut">Сверху — издатели с одним-двумя файлами. Незнакомый издатель с недавним сертификатом и файлом из AppData — повод проверить файл. Краденый сертификат по подписи не отличить: для этого есть проверка по VirusTotal (-UseVirusTotal).</p>'
+  A '</table></div><p class="mut">Publishers with only one or two files come first. An unfamiliar publisher with a recent certificate and a file in AppData is a reason to check the file. A stolen certificate cannot be told apart by the signature alone: use the VirusTotal check (-UseVirusTotal) for that.</p>'
 }
 if ($VtRows.Count -gt 0) {
   $unk = @($VtRows | Where-Object { -not $_.Known }).Count
-  A "<h2>VirusTotal</h2><p>Проверено хэшей: $($VtRows.Count). Не известны VirusTotal: $unk (новый или редкий файл — не обязательно вредоносный, но стоит присмотреться).</p>"
+  A "<h2>VirusTotal</h2><p>Hashes checked:$($VtRows.Count). Unknown to VirusTotal:$unk (a new or rare file - not necessarily malicious, but worth a closer look).</p>"
 }
-A "<h2>Администраторы на этом компьютере</h2><p>$(Esc ($admins -join ', '))</p><p class='mut'>Незнакомых аккаунтов здесь быть не должно.</p>"
-A '<h2>Чего сканер не видит</h2><div class="note"><ul><li><b>Руткиты уровня ядра</b> и вредоносные драйверы — они умеют прятаться от любых программ внутри Windows. Для этого нужна проверка вне системы: Microsoft Defender Offline или Kaspersky Rescue Disk.</li><li><b>Шпионское ПО в подписанных/легитимных оболочках</b> (подписанный по краденому сертификату файл, DLL-инъекции в доверенные процессы).</li><li><b>Роутер, телефон, облачные аккаунты</b> — это отдельные места слежки (проверьте «устройства, вошедшие в аккаунт» в Google/Microsoft/Apple).</li></ul><p><b>Что сделать после:</b> 1) проверить найденные файлы на VirusTotal по хэшу; 2) запустить <i>Autoruns</i> и <i>Process Explorer</i> (Sysinternals) с включённой проверкой VirusTotal; 3) полное сканирование Defender + Malwarebytes; 4) если есть подозрение на слежку — сменить пароли с <i>другого</i> устройства и включить двухфакторную защиту.</p></div>'
+A "<h2>Administrators on this computer</h2><p>$(Esc ($admins -join ', '))</p><p class='mut'>There should be no unfamiliar accounts here.</p>"
+A '<h2>What the scanner cannot see</h2><div class="note"><ul><li><b>Kernel-level rootkits</b> and malicious drivers - they can hide from any program running inside Windows. This needs a check from outside the system: Microsoft Defender Offline or Kaspersky Rescue Disk.</li><li><b>Spyware hiding inside signed or legitimate programs</b> - a file signed with a stolen certificate looks valid by signature alone (use the VirusTotal check), and well-hidden injection (for example manually mapped code) may leave no trace in the module list.</li><li><b>Router, phone, cloud accounts</b> - these are separate places for surveillance (check "devices signed in to your account" in Google/Microsoft/Apple).</li></ul><p><b>What to do next:</b> 1) check the found files on VirusTotal by hash; 2) run <i>Autoruns</i> and <i>Process Explorer</i> (Sysinternals) with VirusTotal checking enabled; 3) run a full Defender + Malwarebytes scan; 4) if you suspect surveillance, change passwords from a <i>different</i> device and enable two-factor authentication.</p></div>'
 A '</main></body></html>'
 
 [IO.File]::WriteAllText($reportPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($true)))
 
 Write-Host ''
-Write-Host "Готово. Высокий риск: $cHigh, средний: $cMed, низкий: $cLow" -ForegroundColor Green
+Write-Host "Done. High risk: $cHigh, medium: $cMed, low: $cLow" -ForegroundColor Green
 foreach ($f in ($sorted | Select-Object -First 8)) {
   $col = if ($f.Points -ge 8) { 'Red' } elseif ($f.Points -ge 4) { 'Yellow' } else { 'Gray' }
   Write-Host ("  [{0}] {1}: {2}" -f (Get-SevName $f.Points), $f.Category, $f.Title) -ForegroundColor $col
 }
-Write-Host "Отчёт: $reportPath" -ForegroundColor Cyan
+Write-Host "Report: $reportPath" -ForegroundColor Cyan
 if (-not $NoOpen) { Start-Process $reportPath }
-if ($Pause) { Read-Host 'Нажмите Enter, чтобы закрыть окно' }
+if ($Pause) { Read-Host 'Press Enter to close the window' }

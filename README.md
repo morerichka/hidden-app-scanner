@@ -1,83 +1,66 @@
-# Hidden App Scanner — поиск скрытых программ в Windows
+# Hidden App Scanner
 
-**Русский** · [English](#english)
+A read-only Windows tool with a simple GUI that looks for signs of hidden crypto-miners, spyware and malware masquerading as system processes on **your own** computer. It writes an HTML report that explains *why* each item looks suspicious.
 
-Программа с окном, которая ищет на **вашем** компьютере признаки скрытых майнеров, шпионского ПО и вредоносных программ, замаскированных под системные процессы. Результат — понятный HTML-отчёт с объяснением, *почему* каждый пункт подозрителен.
+![Hidden App Scanner window](docs/gui.png)
 
-![Окно программы](docs/gui.png)
+> **Read-only.** The tool never deletes, modifies or uploads anything. The only optional network use is sending file **hashes** (never the files) to VirusTotal, and only if you turn that on.
 
-> **Только чтение.** Программа ничего не удаляет, не меняет и не отправляет в интернет. Единственное исключение — по вашему желанию хэши (не файлы) могут уходить в VirusTotal.
+## Quick start
 
-## Быстрый старт
+1. Download the repository: **Code -> Download ZIP**, then extract it.
+2. Double-click **`Start-GUI.bat`** and approve the Windows prompt. Administrator rights are needed to see all processes and services.
+3. Press **Scan**. A full scan takes 2-5 minutes. The report opens automatically and is saved in the `reports\` folder.
 
-1. Скачайте репозиторий: **Code → Download ZIP**, распакуйте.
-2. Дважды щёлкните **`Start-GUI.bat`** и подтвердите запрос Windows (права администратора нужны, чтобы видеть все процессы и службы).
-3. Нажмите **«Сканировать»**. Полный скан занимает 2–5 минут. Отчёт откроется сам и сохранится в папке `reports\`.
+Without the GUI: run `Run-Scan-Console.bat`, or `powershell -ExecutionPolicy Bypass -File .\Scan-HiddenApps.ps1`.
 
-Без интерфейса: `Run-Scan-Console.bat` или `powershell -ExecutionPolicy Bypass -File .\Scan-HiddenApps.ps1`.
+Requires Windows 10/11 and the built-in Windows PowerShell 5.1. Nothing to install.
 
-Требуется Windows 10/11 и встроенный Windows PowerShell 5.1. Ничего устанавливать не нужно.
+## What it checks
 
-## Что проверяется
-
-| Область | Признаки |
+| Area | Indicators |
 |---|---|
-| **Маскировка** | системное имя (`svchost.exe`, `lsass.exe`…) не из `System32`; похожее имя (`svch0st`); неверный родительский процесс; `svchost` без `-k`; двойное расширение; смесь латиницы и кириллицы в имени |
-| **Подписи** | нет подписи, подпись недействительна, файл изменён после подписания; издатель подписи не совпадает с производителем в свойствах файла |
-| **Майнеры** | командная строка (`stratum+tcp`, `--donate-level`, …), имена известных майнеров, порты майнинг-пулов, постоянная нагрузка CPU/GPU у неподписанной программы |
-| **Слежка** | кейлоггеры и программы мониторинга, программы удалённого доступа (по процессам и списку установленных), журнал Windows о доступе к камере, микрофону, экрану и геолокации |
-| **Внедрение** | неподписанные DLL и DLL из пользовательских папок внутри системных процессов; исполняемая память без файла |
-| **Закрепление** | автозапуск (реестр, Startup), планировщик, службы (включая DLL внутри `svchost`), WMI-подписки, Winlogon, IFEO, AppInit_DLLs |
-| **Защита и сеть** | исключения Defender, отключённая защита, файл `hosts`, системный прокси, скрытые учётные записи, нестандартные расширения браузеров |
-| **Репутация (по желанию)** | сверка SHA256 с VirusTotal — это единственный способ поймать файл, подписанный краденым сертификатом |
+| **Masquerading** | system names (`svchost.exe`, `lsass.exe`, ...) outside `System32`; look-alike names (`svch0st`); wrong parent process; `svchost` without `-k`; double extensions; Latin/Cyrillic mixed in a file name |
+| **Signatures** | no signature, invalid signature, file changed after signing; signing publisher differs from the vendor in the file properties |
+| **Miners** | command lines (`stratum+tcp`, `--donate-level`, ...), names of known miners, mining-pool ports, sustained CPU/GPU load from an unsigned program |
+| **Spyware** | keyloggers and monitoring software, remote-access tools (running processes and installed programs), Windows' own log of camera, microphone, screen-capture and location access |
+| **Injection** | unsigned DLLs and DLLs from user-writable folders inside system processes; executable memory without a backing file |
+| **Persistence** | Run keys, Startup folders, scheduled tasks, services (including the DLL behind `svchost`), WMI subscriptions, Winlogon, IFEO, AppInit_DLLs |
+| **Protection & network** | Defender exclusions, disabled protection, `hosts` file, system proxy, hidden local accounts, browser extensions with broad permissions or sideloaded |
+| **Reputation (optional)** | SHA256 lookup on VirusTotal - the practical way to catch a file signed with a stolen certificate |
 
-## Как читать отчёт
+## Reading the report
 
-Каждая находка имеет уровень (высокий / средний / низкий) и список причин. **Это не вердикт**, а признаки: многие нормальные программы не подписаны или лежат в `AppData`. Смотрите, узнаёте ли вы программу, и при сомнении проверьте файл по ссылке у SHA256-хэша.
+Every finding has a level (high / medium / low) and a list of reasons. **This is not a verdict** - these are indicators. Many legitimate programs are unsigned or live in `AppData`. Look at whether you recognize the program, and when in doubt check the file with the SHA256 link on the card.
 
-Чего программа **не видит**: руткиты уровня ядра и вредоносные драйверы (нужна проверка вне системы, например Microsoft Defender Offline), слежку на роутере, телефоне и в облачных аккаунтах.
+What the tool **cannot see**: kernel-level rootkits and malicious drivers (use an offline scan such as Microsoft Defender Offline), surveillance on your router or phone, and compromised cloud accounts.
 
-## Проверка по VirusTotal (необязательно)
+## VirusTotal check (optional)
 
-1. Бесплатный ключ: [virustotal.com](https://www.virustotal.com) → профиль → **API key**.
-2. В окне поставьте галочку «Проверять файлы по VirusTotal» и вставьте ключ. Ключ хранится только в памяти запуска.
-3. В консоли: `$env:VT_API_KEY='ключ'; .\Scan-HiddenApps.ps1 -UseVirusTotal -VtMax 60`.
+1. Get a free key: [virustotal.com](https://www.virustotal.com) -> your profile -> **API key**.
+2. In the GUI tick "Check files on VirusTotal" and paste the key. The key only lives in memory for that run.
+3. In the console: `$env:VT_API_KEY='your-key'; .\Scan-HiddenApps.ps1 -UseVirusTotal -VtMax 60`.
 
-Уходят **только SHA256-хэши**, не файлы. Бесплатный лимит — 4 запроса в минуту, поэтому 60 файлов проверяются около 16 минут.
+**Only SHA256 hashes** are sent, never files. The free tier allows 4 requests per minute, so 60 files take about 16 minutes.
 
-## Параметры консольной версии
+## Console parameters
 
-| Параметр | Что делает |
+| Parameter | Effect |
 |---|---|
-| `-SampleSeconds N` | длительность замера нагрузки CPU/GPU (по умолчанию 8) |
-| `-SkipModules` | не проверять загруженные DLL (быстрее) |
-| `-DeepFiles` | искать файлы майнеров по именам в пользовательских папках (долго) |
-| `-UseVirusTotal` `-VtMax N` | сверка хэшей с VirusTotal |
-| `-NoElevate` / `-NoOpen` | не запрашивать права администратора / не открывать отчёт |
+| `-SampleSeconds N` | length of the CPU/GPU sampling window (default 8) |
+| `-SkipModules` | skip the loaded-DLL check (faster) |
+| `-DeepFiles` | search user folders for miner files by name (slow) |
+| `-UseVirusTotal` `-VtMax N` | look up file hashes on VirusTotal |
+| `-NoElevate` / `-NoOpen` | do not ask for administrator rights / do not open the report |
 
-## Честно о ложных срабатываниях
+## False positives, honestly
 
-- Антивирусы могут насторожиться: скрипт перечисляет процессы, службы и модули — так делают и вредоносные программы. Код открыт, читайте его.
-- Приложения из Microsoft Store подписаны не через Authenticode, а драйверные компоненты — сертификатом Microsoft для драйверов (WHQL). Такие случаи учтены, но редкие исключения возможны.
-- Нормальные программы разработчика (Git, Node, игровые лаунчеры) иногда дают низкий уровень риска.
+- Antivirus products may get suspicious: the script enumerates processes, services and modules, which malware does too. The source is open - read it.
+- Microsoft Store apps are not Authenticode-signed, and some driver components carry Microsoft's driver (WHQL) certificate. These cases are handled, but rare exceptions are possible.
+- Developer tools (Git, Node, game launchers) may occasionally show up at a low level.
 
-Используйте только на своих компьютерах или с разрешения владельца.
+Use only on computers you own or are authorized to audit.
 
-## Лицензия
+## License
 
-MIT — см. [LICENSE](LICENSE).
-
----
-
-<a id="english"></a>
-## English
-
-**Hidden App Scanner** is a read-only Windows tool with a simple GUI that looks for signs of hidden crypto-miners, spyware and malware masquerading as system processes on **your own** machine, and writes an HTML report explaining *why* each item looks suspicious.
-
-**Quick start:** download the ZIP, double-click `Start-GUI.bat`, approve the UAC prompt, press *Scan* (2–5 min). Requires Windows 10/11 and the built-in Windows PowerShell 5.1.
-
-**What it checks:** process masquerading (wrong path/parent, look-alike names), code signatures (missing, invalid, publisher ≠ file vendor), miner indicators (command lines, pool ports, sustained CPU/GPU), stalkerware and remote-access tools, camera/microphone/screen-capture access log, injected DLLs and executable memory without a backing file, persistence (Run keys, Startup, scheduled tasks, services incl. `svchost` ServiceDll, WMI subscriptions, Winlogon, IFEO, AppInit), Defender exclusions, hosts file, proxy, browser extensions, and optional SHA256 reputation lookup on VirusTotal (hashes only, never files).
-
-**Limits:** results are indicators, not verdicts. Kernel-level rootkits and malicious drivers are out of reach for any user-mode tool — use offline scanning (e.g. Microsoft Defender Offline). Antivirus products may flag the script because it enumerates processes and modules; the source is open for review. Use only on machines you own or are authorized to audit.
-
-License: MIT.
+MIT - see [LICENSE](LICENSE).

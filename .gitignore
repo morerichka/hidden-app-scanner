@@ -1,4 +1,4 @@
-# отчёты содержат список программ, пути и IP вашего компьютера — не публиковать
+# reports contain the list of programs, paths and IP addresses of your computer - never publish them
 reports/
 *.html
 !docs/**/*.html
