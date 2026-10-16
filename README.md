@@ -29,6 +29,30 @@ Requires Windows 10/11 and the built-in Windows PowerShell 5.1. Nothing to insta
 | **Protection & network** | Defender exclusions, disabled protection, `hosts` file, system proxy, hidden local accounts, browser extensions with broad permissions or sideloaded |
 | **Reputation (optional)** | SHA256 lookup on VirusTotal - the practical way to catch a file signed with a stolen certificate |
 
+## Startup Manager (optional, changes your system - reversibly)
+
+The scanner itself is read-only. A separate tool, **`Start-StartupManager.bat`** (or the *Startup manager...* button in the main window), lets you switch off programs you do not need at sign-in.
+
+![Startup Manager window](docs/startup-manager.png)
+
+- **Nothing is deleted.** Run-key and Startup-folder entries are only *disabled*, using the same switch as Task Manager > Startup. Scheduled tasks are disabled; services (opt-in) are switched to *Manual*.
+- **A restore file is written before every change** to `backups\`. *Restore from backup...* (or `-Restore <file>`) puts everything back exactly as it was.
+- **Protected, cannot be selected:** Windows system components and security software (Windows Security, Defender, Bitdefender, Kaspersky, ...).
+- **Pre-checked ("Recommended"):** third-party programs - chat clients, launchers, updaters, stale entries.
+- **Left unchecked ("Review"):** hardware/driver helpers (ASUS, NVIDIA, Realtek, ...) that may drive hotkeys, audio, touchpad or fans, and Microsoft apps such as OneDrive. You decide.
+- Changes apply at the next sign-in. "Also close the programs now" additionally ends running copies (unsaved work is lost).
+
+Console use:
+
+```powershell
+.\Manage-Startup.ps1 -List                                  # show everything, nothing changes
+.\Manage-Startup.ps1 -DisableRecommended -DryRun            # preview
+.\Manage-Startup.ps1 -DisableRecommended -Only 'Adobe|Fing' # only entries matching a regex
+.\Manage-Startup.ps1 -Restore .\backups\startup-YYYYMMDD-HHMMSS.json
+```
+
+Administrator rights are needed for all-users entries, scheduled tasks and services; without them those rows are shown but locked.
+
 ## Reading the report
 
 Every finding has a level (high / medium / low) and a list of reasons. **This is not a verdict** - these are indicators. Many legitimate programs are unsigned or live in `AppData`. Look at whether you recognize the program, and when in doubt check the file with the SHA256 link on the card.

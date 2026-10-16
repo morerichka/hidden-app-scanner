@@ -73,6 +73,7 @@ $btnStop.Enabled = $false
 $btnOpen = New-Ctl Button 302 250 150 34 'Open report'
 $btnOpen.Enabled = $false
 $btnFolder = New-Ctl Button 460 250 150 34 'Reports folder'
+$btnStartup = New-Ctl Button 618 250 208 34 'Startup manager...'
 
 $bar = New-Ctl ProgressBar 16 292 810 8 $null
 $bar.Style = 'Continuous'
@@ -82,7 +83,7 @@ $log.Font = New-Object System.Drawing.Font('Consolas', 9.5)
 $log.Anchor = 'Top,Bottom,Left,Right'
 $status = New-Ctl Label 16 586 810 22 'Ready.'
 $status.Anchor = 'Bottom,Left,Right'
-foreach ($c in @($lblTitle, $lblInfo, $lblAdmin, $grp, $btnStart, $btnStop, $btnOpen, $btnFolder, $bar, $log, $status)) { $form.Controls.Add($c) }
+foreach ($c in @($lblTitle, $lblInfo, $lblAdmin, $grp, $btnStart, $btnStop, $btnOpen, $btnFolder, $btnStartup, $bar, $log, $status)) { $form.Controls.Add($c) }
 foreach ($c in @($lblInfo, $lblAdmin, $grp, $bar)) { $c.Anchor = 'Top,Left,Right' }
 
 $script:queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
@@ -175,6 +176,7 @@ $btnStop.Add_Click({
     }
   })
 $btnOpen.Add_Click({ if ($script:reportPath -and (Test-Path $script:reportPath)) { Start-Process $script:reportPath } })
+$btnStartup.Add_Click({ Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$here\Manage-Startup.ps1`"" -WindowStyle Hidden })
 $btnFolder.Add_Click({ if (-not (Test-Path $reportsDir)) { New-Item -ItemType Directory -Path $reportsDir | Out-Null }; Start-Process $reportsDir })
 $form.Add_FormClosing({
     if ($script:proc -and -not $script:proc.HasExited) { & taskkill.exe /PID $script:proc.Id /T /F | Out-Null }

@@ -2,3 +2,6 @@
 reports/
 *.html
 !docs/**/*.html
+
+# restore files are machine-specific
+backups/
