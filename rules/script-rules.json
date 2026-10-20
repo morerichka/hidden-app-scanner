@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "updated": "2026-10-20",
+  "description": "Content heuristics applied to scripts that autostart entries and scheduled tasks point to. Each rule: regex (case-insensitive), points, reason shown in the report.",
+  "rules": [
+    { "id": "defender-tamper", "points": 6, "reason": "changes Defender settings (exclusions / disabling protection)",
+      "regex": "add-mppreference\\s+.*-exclusion|set-mppreference\\s+.*-disable(realtime|behavior|ioav|script)" },
+    { "id": "miner-reference", "points": 8, "reason": "references mining software or pools",
+      "regex": "stratum2?\\+|xmrig|--donate-level|cryptonight|randomx" },
+    { "id": "downloads-data", "points": 4, "reason": "downloads data from the network",
+      "regex": "downloadstring|downloadfile|invoke-webrequest|\\biwr\\b|net\\.webclient|bitsadmin.*transfer|certutil.*-urlcache|start-bitstransfer" },
+    { "id": "base64-decode", "points": 3, "reason": "decodes base64 data",
+      "regex": "frombase64string" },
+    { "id": "eval-string", "points": 2, "reason": "runs a string as code (Invoke-Expression)",
+      "regex": "\\biex\\b|invoke-expression" },
+    { "id": "long-blob", "points": 3, "reason": "contains a long encoded blob",
+      "regex": "[A-Za-z0-9+/=]{300,}", "caseSensitive": true },
+    { "id": "memory-code", "points": 5, "reason": "loads or injects code in memory",
+      "regex": "reflection\\.assembly\\]::load|virtualalloc|createthread|writeprocessmemory" },
+    { "id": "persistence", "points": 3, "reason": "creates persistence (scheduled task / Run key)",
+      "regex": "schtasks(\\.exe)?\\s+/create|reg(\\.exe)?\\s+add\\s+.*\\\\run\\b|new-itemproperty.*\\\\run\\b|register-scheduledtask" },
+    { "id": "backup-destroy", "points": 8, "reason": "deletes backups / shadow copies (ransomware behavior)",
+      "regex": "vssadmin(\\.exe)?\\s+delete\\s+shadows|wbadmin\\s+delete|recoveryenabled\\s+no" },
+    { "id": "firewall-off", "points": 5, "reason": "turns the firewall off",
+      "regex": "netsh\\s+advfirewall\\s+set\\s+.*state\\s+off|set-netfirewallprofile.*-enabled\\s+false" },
+    { "id": "hidden-window", "points": 2, "reason": "hides its window",
+      "regex": "-w(indowstyle)?\\s+hidden|windowstyle\\.hidden" }
+  ]
+}

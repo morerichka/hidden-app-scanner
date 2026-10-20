@@ -13,7 +13,8 @@ param(
   [switch]$Pause,
   [switch]$SkipModules,
   [switch]$UseVirusTotal,
-  [int]$VtMax = 60
+  [int]$VtMax = 60,
+  [switch]$LibraryOnly      # tests: define the functions and return without scanning
 )
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
@@ -22,7 +23,7 @@ $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyI
 if (-not $OutDir) { $OutDir = Join-Path $scriptDir 'reports' }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin -and -not $NoElevate) {
+if (-not $isAdmin -and -not $NoElevate -and -not $LibraryOnly) {
   Write-Host 'Requesting administrator rights (needed to see all processes and services)...' -ForegroundColor Yellow
   $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Pause -SampleSeconds $SampleSeconds"
   if ($DeepFiles) { $argList += ' -DeepFiles' }
@@ -32,7 +33,6 @@ if (-not $isAdmin -and -not $NoElevate) {
   catch { Write-Host 'UAC declined - continuing without administrator rights, the report will be less complete.' -ForegroundColor Yellow }
 }
 
-function Write-Step($t) { Write-Host "[*] $t" -ForegroundColor Cyan }
 
 # ---------------------------------------------------------------- reference data
 $winDir = $env:SystemRoot.ToLower()
@@ -113,8 +113,10 @@ function Get-FileTrust($path) {
   $o = [pscustomobject]@{ Path = $path; Exists = $false; Status = ''; Signer = ''; IsMs = $false; Hash = ''; Company = ''; Size = 0; NotBefore = $null }
   if (Test-Path -LiteralPath $path -PathType Leaf) {
     $o.Exists = $true
+    if ($path -match '\\Microsoft\\WindowsApps\\[^\\]+$') { $o.Status = 'StoreAlias'; $FileCache[$key] = $o; return $o }   # app execution alias: a reparse point that cannot be read or signed
     $sig = Get-AuthenticodeSignature -LiteralPath $path
     $o.Status = [string]$sig.Status
+    if ($o.Status -eq 'UnknownError') { $script:Counters.SigUnknown++ }
     if ($sig.SignerCertificate) {
       $s = $sig.SignerCertificate.Subject
       if ($s -match 'CN="([^"]+)"') { $o.Signer = $Matches[1] }
@@ -126,7 +128,10 @@ function Get-FileTrust($path) {
     $fi = Get-Item -LiteralPath $path -Force
     $o.Size = $fi.Length
     $o.Company = $fi.VersionInfo.CompanyName
-    if ($fi.Length -lt 200MB) { $o.Hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+    if ($fi.Length -lt 1GB) {
+      $o.Hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+      if (-not $o.Hash) { $script:Counters.HashFailed++ }
+    } else { $script:Counters.HashSkipped++ }
   }
   $FileCache[$key] = $o
   return $o
@@ -141,6 +146,7 @@ function Get-ExePathFromCommand($cmd) {
   else { return $null }
   $p = [Environment]::ExpandEnvironmentVariables($p)
   if ($p -match '^[A-Za-z]:\\') { return $p }
+  if ($p -match '[<>"|?*\r\n]' -or $p.Length -gt 240) { return $null }   # not a plausible file name
   foreach ($base in @("$env:SystemRoot\System32", $env:SystemRoot)) {
     $cand = Join-Path $base $p
     if (Test-Path -LiteralPath $cand -PathType Leaf) { return $cand }
@@ -186,10 +192,7 @@ function Get-PathReasons($path, [switch]$Stale) {
 
   if ($SysProc.ContainsKey($name)) {
     $ok = $false
-    foreach ($d in $SysProc[$name].Dirs) {
-      $dl = $d.ToLower()
-      if ($dir -eq $dl -or $dir.StartsWith($dl + '\')) { $ok = $true }
-    }
+    foreach ($d in $SysProc[$name].Dirs) { if (Test-PathUnder $dir $d) { $ok = $true } }
     if (-not $ok) { $r.Add(@{ P = 8; T = "masquerades as the system process $name but lives in $dir" }) }
     elseif (-not $t.IsMs) { $r.Add(@{ P = 6; T = "has the name of the system process $name but is not signed by Microsoft ($($t.Signer))" }) }
   }
@@ -242,8 +245,165 @@ function Get-SevName($pts) { if ($pts -ge 8) { 'High' } elseif ($pts -ge 4) { 'M
 $Findings = New-Object System.Collections.Generic.List[object]
 function Add-Finding($Points, $Category, $Title, $Reasons, $Target, $Hash) {
   if ($Points -lt 2) { return }
-  $Findings.Add([pscustomobject]@{ Points = $Points; Category = $Category; Title = $Title; Reasons = @($Reasons); Target = $Target; Hash = $Hash })
+  $Findings.Add([pscustomobject]@{ Points = $Points; Category = $Category; Class = (Get-FindingClass $Category $Reasons $Points); Title = $Title; Reasons = @($Reasons); Target = $Target; Hash = $Hash })
 }
+
+# ---------------------------------------------------------------- scan coverage / error journal
+# Every step ends in one of: Checked, Limited, Skipped, Unavailable, Error - so the report never claims more than was verified.
+$global:MaximumErrorCount = 8192
+$Coverage = New-Object System.Collections.Generic.List[object]
+$script:Cur = $null
+$script:Counters = @{ HashSkipped = 0; HashFailed = 0; SigUnknown = 0 }
+$AdminHelps = 'processes and network|DLLs loaded|scheduled tasks|services|WMI subscriptions|Defender'
+
+function Close-Check {
+  if (-not $script:Cur) { return }
+  $c = $script:Cur
+  $new = $Error.Count - $c.ErrStart
+  $denied = 0; $other = 0; $samples = @{}
+  if ($new -gt 0) {
+    foreach ($er in @($Error | Select-Object -First $new)) {
+      if ($er.CategoryInfo -and $er.CategoryInfo.Category -eq 'ObjectNotFound') { continue }   # existence probes are expected
+      $msg = [string]$er.Exception.Message
+      if (($er.CategoryInfo -and $er.CategoryInfo.Category -eq 'PermissionDenied') -or $msg -match 'denied|not authorized|privilege') { $denied++ } else { $other++ }
+      $k = if ($msg.Length -gt 80) { $msg.Substring(0, 80) } else { $msg }
+      if ($samples.Count -lt 2 -or $samples.ContainsKey($k)) { $samples[$k] = 1 + [int]$samples[$k] }
+    }
+  }
+  if ($c.Status -eq 'Checked') {
+    if ($denied -gt 0) { $c.Status = 'Limited'; $c.Notes += "$denied read(s) were denied" }
+    if ($other -gt 0) { $c.Status = 'Limited'; $c.Notes += "$other operation(s) failed (e.g. $(($samples.Keys | Select-Object -First 2) -join ' | '))" }
+    if (-not $isAdmin -and $c.Title -match $AdminHelps) { $c.Status = 'Limited'; $c.Notes += 'less data without administrator rights' }
+  }
+  $Coverage.Add([pscustomobject]@{ Title = $c.Title; Status = $c.Status; Note = ($c.Notes -join '; ') })
+  $script:Cur = $null
+}
+function Start-Check($title) { Close-Check; $script:Cur = @{ Title = $title; Status = 'Checked'; Notes = @(); ErrStart = $Error.Count } }
+function Add-CheckNote($note, $status = '') {
+  if (-not $script:Cur) { return }
+  if ($note) { $script:Cur.Notes += $note }
+  # never soften a stronger status (Unavailable / Error) into Limited
+  if ($status -and -not ($status -eq 'Limited' -and $script:Cur.Status -in 'Unavailable', 'Error')) { $script:Cur.Status = $status }
+}
+function Add-Coverage($title, $status, $note) { $Coverage.Add([pscustomobject]@{ Title = $title; Status = $status; Note = $note }) }
+function Write-Step($t) {
+  Write-Host "[*] $t" -ForegroundColor Cyan
+  Start-Check ((($t -replace '\.\.\.$', '') -replace ' - .*$', '') -replace '^(Checking|Reading|Reviewing|Collecting|Analyzing|Sampling|Cross-checking) ', '')
+}
+
+# ---------------------------------------------------------------- path helpers
+function Test-PathUnder($path, $base) {
+  if (-not $path -or -not $base) { return $false }
+  $p = $path.TrimEnd('\').ToLower(); $b = $base.TrimEnd('\').ToLower()
+  return ($p -eq $b -or $p.StartsWith($b + '\'))
+}
+$Interpreters = 'powershell.exe', 'pwsh.exe', 'cmd.exe', 'wscript.exe', 'cscript.exe', 'mshta.exe', 'rundll32.exe', 'regsvr32.exe', 'msiexec.exe', 'wmic.exe', 'bitsadmin.exe', 'certutil.exe', 'forfiles.exe', 'schtasks.exe', 'pcalua.exe', 'installutil.exe', 'msbuild.exe', 'regasm.exe', 'regsvcs.exe', 'odbcconf.exe', 'conhost.exe'
+
+# ---------------------------------------------------------------- content rules (data file, updatable separately from the code)
+$ScriptExt = '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse', '.bat', '.cmd', '.hta', '.wsf'
+$script:ScriptRules = @()
+$script:RulesInfo = 'rules file not loaded'
+function Import-ScriptRules($path) {
+  $script:ScriptRules = @()
+  if (-not $path -or -not (Test-Path -LiteralPath $path)) { $script:RulesInfo = 'rules file not found'; return $false }
+  try {
+    $j = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+    $ok = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($j.rules)) {
+      if (-not $r.regex -or -not $r.reason) { continue }
+      $opts = if ($r.caseSensitive) { [System.Text.RegularExpressions.RegexOptions]::None } else { [System.Text.RegularExpressions.RegexOptions]::IgnoreCase }
+      try { $rx = [System.Text.RegularExpressions.Regex]::new([string]$r.regex, $opts) } catch { continue }
+      $ok.Add(@{ Id = [string]$r.id; Rx = $rx; P = [int]$r.points; T = [string]$r.reason })
+    }
+    $script:ScriptRules = $ok.ToArray()
+    $script:RulesInfo = "rules v$($j.version) ($($j.updated)), $($ok.Count) active"
+    return ($ok.Count -gt 0)
+  } catch { $script:RulesInfo = "rules file unreadable: $($_.Exception.Message)"; return $false }
+}
+
+# ---------------------------------------------------------------- payload analysis: what a command actually runs
+function Get-ScriptContentReasons($path) {
+  $r = New-Object System.Collections.Generic.List[object]
+  if (-not $path -or [IO.Path]::GetExtension($path).ToLower() -notin $ScriptExt) { return ,$r }
+  $txt = $null
+  try {
+    $fi = Get-Item -LiteralPath $path -ErrorAction Stop
+    if ($fi.Length -gt 2MB) { $r.Add(@{ P = 1; T = 'script is larger than 2 MB and was not read' }); return ,$r }
+    $txt = [IO.File]::ReadAllText($path)
+  } catch { return ,$r }
+  foreach ($rule in $script:ScriptRules) { if ($rule.Rx.IsMatch($txt)) { $r.Add(@{ P = $rule.P; T = "script $($rule.T)" }) } }
+  return ,$r
+}
+
+function Get-ReferencedFiles($cmd, $primary) {
+  $out = New-Object System.Collections.Generic.List[string]
+  if ([string]::IsNullOrWhiteSpace($cmd)) { return ,$out }
+  $ext = 'ps1|psm1|vbs|vbe|js|jse|bat|cmd|hta|wsf|dll|exe|scr|com|cpl|msi|ocx|sys'
+  $rx = '(?i)"([A-Za-z]:\\[^"]+?\.(?:' + $ext + '))"|(?<![\w\\])([A-Za-z]:\\[^\s"''<>|,;]+\.(?:' + $ext + '))'
+  foreach ($m in [regex]::Matches($cmd, $rx)) {
+    $p = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+    if ($primary -and $p -ieq $primary) { continue }
+    if ($p -notin $out) { $out.Add($p) }
+  }
+  return ,$out
+}
+
+function Get-PayloadReasons($cmd, $primary) {
+  $r = New-Object System.Collections.Generic.List[object]
+  foreach ($f in (Get-ReferencedFiles $cmd $primary)) {
+    $leaf = [IO.Path]::GetFileName($f)
+    foreach ($x in (Get-PathReasons $f -Stale)) { $r.Add(@{ P = $x.P; T = "referenced file ${leaf}: $($x.T)" }) }
+    foreach ($x in (Get-ScriptContentReasons $f)) { $r.Add(@{ P = $x.P; T = "referenced file ${leaf}: $($x.T)" }) }
+  }
+  return ,$r
+}
+
+# A Microsoft task may be skipped only when it runs a signed Windows binary directly with no payload files.
+# A signed interpreter (powershell, cmd, rundll32, ...) proves nothing about the script it runs.
+function Test-MsTaskTrivial($cmd) {
+  $exp = [Environment]::ExpandEnvironmentVariables([string]$cmd)
+  $exe = Get-ExePathFromCommand $exp
+  if (-not $exe -or -not (Test-PathUnder $exe $winDir)) { return $false }
+  $t = Get-FileTrust $exe
+  if (-not $t -or -not $t.IsMs) { return $false }
+  if ($Interpreters -contains ([IO.Path]::GetFileName($exe).ToLower())) { return $false }
+  if ((Get-ReferencedFiles $exp $exe).Count -gt 0) { return $false }
+  return $true
+}
+
+# ---------------------------------------------------------------- finding classes
+function Get-FindingClass($Category, $Reasons, $Points) {
+  $txt = (@($Reasons) -join ' ')
+  if ($Category -eq 'Defender' -or ($Category -eq 'VirusTotal' -and $Points -ge 9)) { return 'Confirmed threat' }
+  if ($Category -eq 'Program' -or $txt -match 'remote-access tool|known stalkerware|keylogger|matches a known miner|monitoring program|mining software') { return 'Unwanted program' }
+  return 'Suspicious indicator'
+}
+
+# ---------------------------------------------------------------- autostart evaluation (shared by Run keys, Startup, tasks)
+$Autoruns = New-Object System.Collections.Generic.List[object]
+function Test-Autorun($Source, $Name, $Cmd, $Category) {
+  $exp = [Environment]::ExpandEnvironmentVariables([string]$Cmd)
+  $reasons = New-Object System.Collections.Generic.List[object]
+  $path = Get-ExePathFromCommand $exp
+  $trust = $null
+  if ($path) {
+    foreach ($x in (Get-PathReasons $path -Stale)) { $reasons.Add($x) }
+    $trust = Get-FileTrust $path
+  }
+  foreach ($x in (Get-CmdReasons $exp)) { $reasons.Add($x) }
+  # the payload: scripts, DLLs and executables named in the arguments are checked as well, not just the launcher
+  foreach ($x in (Get-PayloadReasons $exp $path)) { $reasons.Add($x) }
+  $pts = Sum-Reasons $reasons
+  $isMs = ($trust -and $trust.IsMs)
+  $Autoruns.Add([pscustomobject]@{ Source = $Source; Name = $Name; Command = $exp; Signer = $(if ($trust) { $trust.Signer } else { '' }); Status = $(if ($trust) { $trust.Status } else { '?' }); IsMs = $isMs; Points = $pts; Hash = $(if ($trust) { $trust.Hash } else { '' }) })
+  if ($pts -ge 2) {
+    Add-Finding $pts $Category "$Source`: $Name" (Uniq-Texts $reasons) $exp $(if ($trust) { $trust.Hash } else { '' })
+  }
+}
+
+[void](Import-ScriptRules (Join-Path $scriptDir 'rules\script-rules.json'))
+if ($LibraryOnly) { return }   # tests dot-source the script to get the functions above without scanning
+
 
 # ---------------------------------------------------------------- 1. processes + CPU/GPU sampling
 Write-Step 'Collecting processes and network connections...'
@@ -299,6 +459,8 @@ foreach ($p in $cim) {
   $groups[$key].Add($p)
 }
 
+$noPath = @($cim | Where-Object { [int]$_.ProcessId -gt 4 -and -not $_.ExecutablePath }).Count
+if ($noPath -gt 0) { Add-CheckNote "image path unreadable for $noPath of $($cim.Count) processes (protected or access denied)" 'Limited' }
 $TopLoad = New-Object System.Collections.Generic.List[object]
 $NetRows = New-Object System.Collections.Generic.List[object]
 $pseudo = 'system', 'registry', 'memory compression', 'secure system', 'vmmem', 'vmmemwsl', 'system idle process'
@@ -332,7 +494,7 @@ foreach ($key in $groups.Keys) {
     if ($SysProc.ContainsKey($lname) -and $SysProc[$lname].Parent) {
       $par = $byId[[int]$p.ParentProcessId]
       if ($par -and $par.Name.ToLower() -ne $SysProc[$lname].Parent) {
-        $reasons.Add(@{ P = 4; T = "unexpected parent process:$($par.Name) (expected$($SysProc[$lname].Parent))" })
+        $reasons.Add(@{ P = 4; T = "unexpected parent process: $($par.Name) (expected$($SysProc[$lname].Parent))" })
       }
     }
     if ($cpuPct.ContainsKey($id)) { $cpuSum += $cpuPct[$id] }
@@ -351,7 +513,7 @@ foreach ($key in $groups.Keys) {
   if ($cpuSum -ge 25 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "high CPU load ($([Math]::Round($cpuSum,0))% of all cores) from an unsigned program" }) }
   if ($gpuMax -ge 40 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "high GPU load ($gpuMax%) from an unsigned program" }) }
   if ($ext -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = "an unsigned program talks to the internet ($ext connections)" }) }
-  if ($mine.Count -gt 0) { $reasons.Add(@{ P = 3; T = "connections to ports typical for mining pools:$((@($mine | Select-Object -Unique)) -join ', ')" }) }
+  if ($mine.Count -gt 0) { $reasons.Add(@{ P = 3; T = "connections to ports typical for mining pools: $((@($mine | Select-Object -Unique)) -join ', ')" }) }
   if ($listenAll -gt 0 -and $notValid -and $lname -notin $pseudo) { $reasons.Add(@{ P = 2; T = 'an unsigned program listens for incoming network connections' }) }
 
   $TopLoad.Add([pscustomobject]@{ Name = $name; Count = $inst.Count; Cpu = [Math]::Round($cpuSum, 1); Gpu = $gpuMax; Signer = $(if ($trust) { $trust.Signer } else { '' }); Path = $path })
@@ -420,12 +582,14 @@ public static class MemScan {
   }
   $jitHosts = 'powershell|pwsh|dotnet|code|node|electron|chrome|msedge|firefox|brave|discord|slack|teams|telegram|claude|java|python|steam|epicgames|cef|webview'
   $modSeen = @{}
+  $modOk = 0; $modFail = 0
   $rwxOne = New-Object System.Collections.Generic.List[string]
   foreach ($pr in [Diagnostics.Process]::GetProcesses()) {
     if ($pr.Id -le 4 -or $pr.Id -eq $PID) { continue }
     $exePath = $null; $mods = $null
-    try { $exePath = Normalize-Path $pr.MainModule.FileName; $mods = $pr.Modules } catch { continue }
-    if (-not $exePath -or -not $mods) { continue }
+    try { $exePath = Normalize-Path $pr.MainModule.FileName; $mods = $pr.Modules } catch { $modFail++; continue }
+    if (-not $exePath -or -not $mods) { $modFail++; continue }
+    $modOk++
     $pt = Get-FileTrust $exePath
     $pIsSystem = [bool]($pt -and $pt.IsMs)
     $pname = $pr.ProcessName
@@ -472,34 +636,12 @@ public static class MemScan {
     Add-Finding 2 'Injected DLL' "$($rwxOne.Count) system processes each have one executable memory region without a file (uniform pattern)" @('the same picture across many processes points to a shared mechanism rather than targeted injection: usually protective hooks of an antivirus or driver. If you have no antivirus, take a closer look') (($rwxOne | Select-Object -First 25) -join ', ') ''
   }
 }
-# ---------------------------------------------------------------- 2. autostart
-$Autoruns = New-Object System.Collections.Generic.List[object]
-function Test-Autorun($Source, $Name, $Cmd, $Category) {
-  $exp = [Environment]::ExpandEnvironmentVariables([string]$Cmd)
-  $reasons = New-Object System.Collections.Generic.List[object]
-  $path = Get-ExePathFromCommand $exp
-  $trust = $null
-  if ($path) {
-    foreach ($x in (Get-PathReasons $path -Stale)) { $reasons.Add($x) }
-    $trust = Get-FileTrust $path
-  }
-  foreach ($x in (Get-CmdReasons $exp)) { $reasons.Add($x) }
-  # scripts in user folders launched through interpreters
-  foreach ($m in [regex]::Matches($exp, '([A-Za-z]:\\[^"''\r\n]+?\.(ps1|vbs|vbe|js|jse|bat|cmd|hta|wsf))', 'IgnoreCase')) {
-    $sp = $m.Groups[1].Value
-    $lr = Get-LocationReason $sp
-    if ($lr) { $reasons.Add(@{ P = [Math]::Max($lr.P, 2); T = "runs a script from a user-writable folder:$sp" }) }
-    if (-not (Test-Path -LiteralPath $sp)) { $reasons.Add(@{ P = 3; T = "script not found:$sp" }) }
-  }
-  $pts = Sum-Reasons $reasons
-  $isMs = ($trust -and $trust.IsMs)
-  $Autoruns.Add([pscustomobject]@{ Source = $Source; Name = $Name; Command = $exp; Signer = $(if ($trust) { $trust.Signer } else { '' }); Status = $(if ($trust) { $trust.Status } else { '?' }); IsMs = $isMs; Points = $pts; Hash = $(if ($trust) { $trust.Hash } else { '' }) })
-  if ($pts -ge 2) {
-    Add-Finding $pts $Category "$Source`: $Name" (Uniq-Texts $reasons) $exp $(if ($trust) { $trust.Hash } else { '' })
-  }
-}
+if ($SkipModules) { Add-Coverage 'DLLs loaded into processes and memory without a file' 'Skipped' 'disabled with -SkipModules' }
+else { Add-CheckNote "module list read for $modOk of $($modOk + $modFail) processes; the rest are protected or denied (cannot be inspected)" $(if ($modFail -gt 0) { 'Limited' } else { '' }); Add-CheckNote 'memory check covers only RWX private regions in system processes - it does not detect every injection technique' }
 
+# ---------------------------------------------------------------- 2. autostart
 Write-Step 'Checking autostart (registry, Startup folders)...'
+Add-CheckNote 
 $runKeys = @(
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
@@ -528,17 +670,14 @@ foreach ($sf in @("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup", 
 }
 
 Write-Step 'Checking scheduled tasks...'
+$msTrivial = 0
 foreach ($t in @(Get-ScheduledTask)) {
   $isMsTask = ($t.TaskPath -like '\Microsoft\*')
   foreach ($a in $t.Actions) {
     if (-not $a.Execute) { continue }
     $cmd = ("$($a.Execute) $($a.Arguments)").Trim()
     $src = "Task $($t.TaskPath)$($t.TaskName)"
-    if ($isMsTask) {
-      # for system tasks we only check that they do not point outside Windows
-      $pth = Get-ExePathFromCommand ([Environment]::ExpandEnvironmentVariables($cmd))
-      if ($pth -and $pth.ToLower().StartsWith($winDir)) { continue }
-    }
+    if ($isMsTask -and (Test-MsTaskTrivial $cmd)) { $msTrivial++; continue }
     Test-Autorun $src $t.TaskName $cmd 'Scheduler'
     if (-not $isMsTask -and $t.Settings.Hidden) {
       Add-Finding 2 'Scheduler' "$src (hidden task)" @('the task is flagged as hidden (Hidden)') $cmd ''
@@ -546,6 +685,7 @@ foreach ($t in @(Get-ScheduledTask)) {
   }
 }
 
+Add-CheckNote "$msTrivial Microsoft task(s) trusted by signature and path (signed Windows binary, no payload files); all others - including Microsoft tasks that run an interpreter or a script - were analyzed in full"
 Write-Step 'Checking services (including DLLs inside svchost)...'
 $ServiceRows = New-Object System.Collections.Generic.List[object]
 foreach ($s in @(Get-CimInstance Win32_Service)) {
@@ -576,12 +716,12 @@ foreach ($s in @(Get-CimInstance Win32_Service)) {
 }
 
 # ---------------------------------------------------------------- 3. registry, WMI, protection
-Write-Step 'Checking WMI subscriptions, Winlogon, IFEO, AppInit, Defender, hosts, proxy...'
+Write-Step 'Checking WMI subscriptions, Winlogon, IFEO and AppInit...'
 foreach ($c in @(Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer)) {
   if ($c.CimClass.CimClassName -eq 'NTEventLogEventConsumer') { continue }
   $body = "$($c.CommandLineTemplate) $($c.ExecutablePath) $($c.ScriptText)".Trim()
   if ($body.Length -gt 400) { $body = $body.Substring(0, 400) + '...' }
-  Add-Finding 7 'WMI' "WMI subscription:$($c.Name) [$($c.CimClass.CimClassName)]" @('a permanent WMI subscription runs commands on its own - a favorite way to hide autostart; rare in ordinary programs') $body ''
+  Add-Finding 7 'WMI' "WMI subscription: $($c.Name) [$($c.CimClass.CimClassName)]" @('a permanent WMI subscription runs commands on its own - a favorite way to hide autostart; rare in ordinary programs') $body ''
 }
 $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $wlp = Get-ItemProperty $wl
@@ -596,17 +736,28 @@ foreach ($k in @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersi
 $aw = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows'
 if ($aw.AppInit_DLLs -and $aw.LoadAppInit_DLLs -eq 1) { Add-Finding 6 'Registry' 'AppInit_DLLs: a DLL is injected into every program' @('the library is loaded into every process that has a UI') ([string]$aw.AppInit_DLLs) '' }
 
+Start-Check 'Microsoft Defender settings and detections'
 $mp = Get-MpPreference
+if (-not $mp) { Add-CheckNote 'Get-MpPreference returned nothing (Defender not active or not accessible)' 'Unavailable' }
 if ($mp) {
-  foreach ($e in @($mp.ExclusionPath)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (path):$e" @('Defender scans nothing in this folder. Miners like adding such exclusions; developers have them too - think whether you added this one') $e '' } }
-  foreach ($e in @($mp.ExclusionProcess)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (process):$e" @('Defender does not scan this process') $e '' } }
-  foreach ($e in @($mp.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 2 'Protection' "Defender exclusion (extension):$e" @('Defender does not scan files with this extension') $e '' } }
+  foreach ($e in @($mp.ExclusionPath)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (path): $e" @('Defender scans nothing in this folder. Miners like adding such exclusions; developers have them too - think whether you added this one') $e '' } }
+  foreach ($e in @($mp.ExclusionProcess)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 3 'Protection' "Defender exclusion (process): $e" @('Defender does not scan this process') $e '' } }
+  foreach ($e in @($mp.ExclusionExtension)) { if ($e -and $e -notmatch '^N/A') { Add-Finding 2 'Protection' "Defender exclusion (extension): $e" @('Defender does not scan files with this extension') $e '' } }
   if (-not $isAdmin) { Add-Finding 0 'Protection' 'Defender exclusions are not visible without administrator rights' @('') '' '' }
 }
 $ms = Get-MpComputerStatus
 $otherAv = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct | Where-Object { $_.displayName -notmatch '^(Windows|Microsoft) Defender' } | ForEach-Object { $_.displayName })
 if ($ms -and -not $ms.RealTimeProtectionEnabled -and $otherAv.Count -eq 0) { Add-Finding 5 'Protection' 'Defender real-time protection is off and no other antivirus was found' @('malware often disables Defender first - turn protection back on in Windows Security') '' '' }
 elseif ($otherAv.Count -eq 0 -and -not $ms) { Add-Finding 3 'Protection' 'No working antivirus was found' @('Windows reports no antivirus product') '' '' }
+$threatNames = @{}
+foreach ($th in @(Get-MpThreat)) { $threatNames[[string]$th.ThreatID] = $th.ThreatName }
+foreach ($td in @(Get-MpThreatDetection | Where-Object { $_.InitialDetectionTime -gt (Get-Date).AddDays(-30) })) {
+  $tn = $threatNames[[string]$td.ThreatID]; if (-not $tn) { $tn = "threat $($td.ThreatID)" }
+  $handled = [bool]$td.ActionSuccess
+  Add-Finding $(if ($handled) { 6 } else { 9 }) 'Defender' "Microsoft Defender detected $tn" @("detected $($td.InitialDetectionTime.ToString('yyyy-MM-dd HH:mm')); $(if ($handled) { 'Defender reports the action succeeded' } else { 'no successful remediation is recorded - see Windows Security > Protection history' })") ((@($td.Resources) -join '; ')) ''
+}
+if ($otherAv.Count -gt 0) { Add-CheckNote "only Microsoft Defender history is readable; detections of $($otherAv -join ', ') are kept in that product and are not included" 'Limited' }
+Start-Check 'hosts file, proxy and local accounts'
 
 $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
 $hostLines = @(Get-Content $hostsFile | Where-Object { $_ -and $_ -notmatch '^\s*#' -and $_ -notmatch '(?i)\blocalhost\b' })
@@ -619,11 +770,11 @@ if ($hostLines.Count -gt 0 -and $hostLines.Count -le 60) {
   Add-Finding 2 'Network' "The hosts file has $($hostLines.Count) entries" @('looks like an ad block list; if you did not install one, check the file') $hostsFile ''
 }
 $is = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-if ($is.ProxyEnable -eq 1 -and $is.ProxyServer) { Add-Finding 3 'Network' "System proxy is enabled:$($is.ProxyServer)" @('all web traffic goes through the specified server. If you did not set up a proxy/VPN yourself, treat this with suspicion') ([string]$is.ProxyServer) '' }
+if ($is.ProxyEnable -eq 1 -and $is.ProxyServer) { Add-Finding 3 'Network' "System proxy is enabled: $($is.ProxyServer)" @('all web traffic goes through the specified server. If you did not set up a proxy/VPN yourself, treat this with suspicion') ([string]$is.ProxyServer) '' }
 if ($is.AutoConfigURL) { Add-Finding 3 'Network' "A proxy auto-config (PAC) script is set" @('a PAC script can redirect traffic to a foreign server') ([string]$is.AutoConfigURL) '' }
 
 foreach ($u in @(Get-LocalUser)) {
-  if ($u.Name -like '*$') { Add-Finding 5 'Account' "Local user hidden by name (the name ends with a dollar sign):$($u.Name)" @('such a name hides the account from some listings') $u.Name '' }
+  if ($u.Name -like '*$') { Add-Finding 5 'Account' "Local user hidden by name (the name ends with a dollar sign): $($u.Name)" @('such a name hides the account from some listings') $u.Name '' }
 }
 $admins = @(Get-LocalGroupMember -Group 'Administrators' | ForEach-Object { $_.Name })
 
@@ -659,9 +810,9 @@ foreach ($c in $Consents) {
   if (-not $t -or -not $t.Exists) { }
   else {
     foreach ($x in (Get-PathReasons $c.App)) { $reasons.Add($x) }
-    if ($t.Status -ne 'Valid' -and $recent) { $reasons.Add(@{ P = 2; T = "an unsigned program used:$($c.Cap.ToLower()) (last time$($c.Start.ToString('yyyy-MM-dd HH:mm')))" }) }
+    if ($t.Status -ne 'Valid' -and $recent) { $reasons.Add(@{ P = 2; T = "an unsigned program used: $($c.Cap.ToLower()) (last time$($c.Start.ToString('yyyy-MM-dd HH:mm')))" }) }
   }
-  if ($c.InUse -and $t -and $t.Status -ne 'Valid') { $reasons.Add(@{ P = 3; T = "USING RIGHT NOW:$($c.Cap.ToLower())" }) }
+  if ($c.InUse -and $t -and $t.Status -ne 'Valid') { $reasons.Add(@{ P = 3; T = "USING RIGHT NOW: $($c.Cap.ToLower())" }) }
   $pts = Sum-Reasons $reasons
   if ($pts -ge 3) { Add-Finding $pts 'Camera/Mic' "$($c.Cap): $([IO.Path]::GetFileName($c.App))" (Uniq-Texts $reasons) $c.App $(if ($t) { $t.Hash } else { '' }) }
 }
@@ -673,9 +824,9 @@ foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 
   $Programs += @(Get-ItemProperty $k | Where-Object { $_.DisplayName })
 }
 foreach ($pg in $Programs) {
-  if ($pg.DisplayName -match $SpyRx) { Add-Finding 6 'Program' "Monitoring program installed:$($pg.DisplayName)" @('the name matches a known keylogger / monitoring program. If you did not install it, this is very likely what you are looking for') "$($pg.InstallLocation) $($pg.Publisher)" '' }
-  elseif ($pg.DisplayName -match $RatRx) { Add-Finding 4 'Program' "Remote-access program installed:$($pg.DisplayName)" @('such programs let someone view and control the computer. If you did not install it yourself, remove it') "$($pg.InstallLocation) $($pg.Publisher)" '' }
-  elseif ($pg.DisplayName -match $MinerNames) { Add-Finding 8 'Program' "Miner installed:$($pg.DisplayName)" @('the name matches a known miner') "$($pg.InstallLocation)" '' }
+  if ($pg.DisplayName -match $SpyRx) { Add-Finding 6 'Program' "Monitoring program installed: $($pg.DisplayName)" @('the name matches a known keylogger / monitoring program. If you did not install it, this is very likely what you are looking for') "$($pg.InstallLocation) $($pg.Publisher)" '' }
+  elseif ($pg.DisplayName -match $RatRx) { Add-Finding 4 'Program' "Remote-access program installed: $($pg.DisplayName)" @('such programs let someone view and control the computer. If you did not install it yourself, remove it') "$($pg.InstallLocation) $($pg.Publisher)" '' }
+  elseif ($pg.DisplayName -match $MinerNames) { Add-Finding 8 'Program' "Miner installed: $($pg.DisplayName)" @('the name matches a known miner') "$($pg.InstallLocation)" '' }
 }
 
 # ---------------------------------------------------------------- 6. browser extensions
@@ -709,7 +860,7 @@ foreach ($bn in $browsers.Keys) {
       $sideload = -not $m.update_url
       $pts = 0; $why = @()
       if ($broad) { $pts += 1; $why += 'access to all websites' }
-      if ($sens.Count -ge 2) { $pts += 1; $why += "sensitive permissions:$($sens -join ', ')" }
+      if ($sens.Count -ge 2) { $pts += 1; $why += "sensitive permissions: $($sens -join ', ')" }
       if ($sideload) { $pts += 2; $why += 'no update URL - not installed from a store (manually or by a program)' }
       $Exts.Add([pscustomobject]@{ Browser = $bn; Profile = $prof.Name; Id = $ed.Name; Name = $nm; Version = $m.version; Broad = $broad; Sens = ($sens -join ', '); Sideload = $sideload; Points = $pts })
       if ($pts -ge 3) { Add-Finding $pts 'Extension' "$bn`: $nm" $why "id: $($ed.Name)  ($($prof.Name))" '' }
@@ -722,7 +873,8 @@ if ($DeepFiles) {
   Write-Step 'Searching user folders for miner files by name (slow)...'
   $roots = @($env:TEMP, "$env:LOCALAPPDATA", "$env:APPDATA", $env:ProgramData, "$env:PUBLIC", "$env:USERPROFILE\Downloads")
   foreach ($f in @(Get-ChildItem -Path $roots -Recurse -Depth 4 -File -Force | Where-Object { $_.Name -match $MinerNames -or $_.Name -match '(?i)^(config|pools?)\.json$' -and (Select-String -Path $_.FullName -Pattern 'stratum|"pools"|donate-level' -Quiet) })) {
-    Add-Finding 7 'File' "File that looks like a miner:$($f.Name)" @('the name or contents point to a miner') $f.FullName ''
+    $fh = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+    Add-Finding 7 'File' "File that looks like a miner: $($f.Name)" @('the name or contents point to a miner (name/config match only - this is not a content scan of every file)') $f.FullName $fh
   }
 }
 
@@ -750,10 +902,12 @@ foreach ($t in @($FileCache.Values)) {
 }
 
 # ---------------------------------------------------------------- 9. VirusTotal reputation (optional, only hashes are sent)
+if (-not $DeepFiles) { Add-Coverage 'Searching user folders for miner files by name' 'Skipped' 'not enabled (-DeepFiles); even when enabled it is a name/config search, not a scan of file contents' }
+if (-not $UseVirusTotal) { Add-Coverage 'VirusTotal reputation lookup' 'Skipped' 'not enabled (-UseVirusTotal)' }
 $VtRows = New-Object System.Collections.Generic.List[object]
 if ($UseVirusTotal) {
   $vtKey = $env:VT_API_KEY
-  if (-not $vtKey) { Write-Host '[!] For -UseVirusTotal set your key in the VT_API_KEY environment variable (free key: virustotal.com -> profile -> API key). Skipping.' -ForegroundColor Yellow }
+  if (-not $vtKey) { Add-Coverage 'VirusTotal reputation lookup' 'Skipped' 'enabled but VT_API_KEY is not set'; Write-Host '[!] For -UseVirusTotal set your key in the VT_API_KEY environment variable (free key: virustotal.com -> profile -> API key). Skipping.' -ForegroundColor Yellow }
   else {
     Write-Step "Checking hashes against VirusTotal (up to $VtMax files, about 4 requests per minute - this is slow)..."
     $prio = New-Object System.Collections.Generic.List[string]
@@ -779,15 +933,27 @@ if ($UseVirusTotal) {
       $done++
       Start-Sleep -Seconds 16
     }
+    Add-CheckNote "looked up $done of $([Math]::Min($VtMax, $prio.Count)) hash(es); only existing VirusTotal reports are read - unknown files are not analyzed" $(if ($done -lt [Math]::Min($VtMax, $prio.Count)) { 'Limited' } else { '' })
   }
 }
 
 # ---------------------------------------------------------------- report
-Write-Step 'Building the report...'
+Close-Check
+Write-Host '[*] Building the report...' -ForegroundColor Cyan
+$cache = @($FileCache.Values)
+$cFiles = @($cache | Where-Object { $_.Exists }).Count
+$cHashed = @($cache | Where-Object { $_.Exists -and $_.Hash }).Count
+$hashNote = "$cFiles file(s) examined, $cHashed hashed; not hashed: $($script:Counters.HashSkipped) over 1 GB, $($script:Counters.HashFailed) unreadable; signature could not be verified for $($script:Counters.SigUnknown)"
+Add-Coverage 'File hashing and signature checks' $(if (($script:Counters.HashSkipped + $script:Counters.HashFailed + $script:Counters.SigUnknown) -gt 0) { 'Limited' } else { 'Checked' }) $hashNote
+$covOk = @($Coverage | Where-Object { $_.Status -eq 'Checked' }).Count
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $reportPath = Join-Path $OutDir "report-$stamp.html"
-$sorted = @($Findings | Sort-Object -Property @{ Expression = { $_.Points }; Descending = $true }, Category)
+$classRank = @{ 'Confirmed threat' = 0; 'Unwanted program' = 1; 'Suspicious indicator' = 2 }
+$sorted = @($Findings | Sort-Object -Property @{ Expression = { $classRank[$_.Class] } }, @{ Expression = { $_.Points }; Descending = $true }, Category)
+$nConf = @($sorted | Where-Object { $_.Class -eq 'Confirmed threat' }).Count
+$nPup = @($sorted | Where-Object { $_.Class -eq 'Unwanted program' }).Count
+$nInd = @($sorted | Where-Object { $_.Class -eq 'Suspicious indicator' }).Count
 $cHigh = @($sorted | Where-Object { $_.Points -ge 8 }).Count
 $cMed = @($sorted | Where-Object { $_.Points -ge 4 -and $_.Points -lt 8 }).Count
 $cLow = @($sorted | Where-Object { $_.Points -lt 4 }).Count
@@ -806,15 +972,15 @@ A '.badge{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;bo
 A '.f ul{margin:6px 0 6px 18px;padding:0}code,pre{font:12.5px/1.45 ui-monospace,Consolas,monospace}pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0 0;white-space:pre-wrap;word-break:break-all}'
 A 'table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:600}td.p{font:12px ui-monospace,Consolas,monospace;word-break:break-all}'
 A '.tw{overflow-x:auto}a{color:inherit}.note{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}</style></head><body><main>'
-A "<h1>Report: hidden and masquerading programs</h1><div class='mut'>$(Esc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm') | $(if($isAdmin){'run as administrator'}else{'<b>without administrator rights - the report is incomplete</b>'})</div>"
-A "<div class='sum'><div class='pill'><b style='color:var(--high)'>$cHigh</b>high risk</div><div class='pill'><b style='color:var(--med)'>$cMed</b>medium</div><div class='pill'><b style='color:var(--low)'>$cLow</b>low</div><div class='pill'><b>$($groups.Count)</b>programs running</div><div class='pill'><b>$($Autoruns.Count)</b>autostart entries</div></div>"
-A "<div class='note'><b>How to read this.</b> This is not an antivirus and not a verdict: the scanner shows <i>indicators</i> (signature, launch location, behavior, persistence). Many ordinary programs are unsigned or live in AppData - look at the reasons in each card and at whether you recognize the program. Nothing was deleted or uploaded: to check a file on VirusTotal, click the link next to its hash (only the hash is sent, not the file).</div>"
+A "<h1>Report: hidden and masquerading programs</h1><div class='mut'>$(Esc $env:COMPUTERNAME) | $(Get-Date -Format 'yyyy-MM-dd HH:mm') | $(if($isAdmin){'run as administrator'}else{'<b>without administrator rights - several checks are limited</b>'}) | coverage: $covOk of $($Coverage.Count) checks complete (see Scan coverage)</div>"
+A "<div class='sum'><div class='pill'><b style='color:var(--high)'>$nConf</b>confirmed threats</div><div class='pill'><b style='color:var(--med)'>$nPup</b>unwanted programs</div><div class='pill'><b>$nInd</b>suspicious indicators</div><div class='pill'><b style='color:var(--high)'>$cHigh</b>high risk</div><div class='pill'><b style='color:var(--med)'>$cMed</b>medium</div><div class='pill'><b style='color:var(--low)'>$cLow</b>low</div><div class='pill'><b>$($groups.Count)</b>programs running</div><div class='pill'><b>$($Autoruns.Count)</b>autostart entries</div></div>"
+A "<div class='note'><b>How to read this.</b> This is not an antivirus and not a verdict. Findings are labeled <i>Confirmed threat</i> (only when Microsoft Defender detected it or at least 3 VirusTotal engines flag the file), <i>Unwanted program</i> (known remote-access, monitoring or mining software) or <i>Suspicious indicator</i> (a sign worth a look, not proof). The scanner shows the scanner shows <i>indicators</i> (signature, launch location, behavior, persistence). Many ordinary programs are unsigned or live in AppData - look at the reasons in each card and at whether you recognize the program. Nothing was deleted or uploaded: to check a file on VirusTotal, click the link next to its hash (only the hash is sent, not the file).</div>"
 
 A '<h2>Findings</h2>'
-if ($sorted.Count -eq 0) { A "<p style='color:var(--ok)'><b>No obvious indicators found.</b> This is not a guarantee: see "What the scanner cannot see" below.</p>" }
+if ($sorted.Count -eq 0) { A "<p style='color:var(--ok)'><b>No obvious indicators found.</b> This is not a guarantee: see 'What the scanner cannot see' below.</p>" }
 foreach ($f in $sorted) {
   $cl = Get-SevClass $f.Points
-  A "<div class='f $cl'><span class='badge b-$cl'>$(Get-SevName $f.Points)</span><span class='mut'>$(Esc $f.Category)</span> <b>$(Esc $f.Title)</b><ul>"
+  A "<div class='f $cl'><span class='badge b-$cl'>$(Get-SevName $f.Points)</span><span class='mut'>$(Esc $f.Class) / $(Esc $f.Category)</span> <b>$(Esc $f.Title)</b><ul>"
   foreach ($r in $f.Reasons) { if ($r) { A "<li>$(Esc $r)</li>" } }
   A '</ul>'
   if ($f.Target) { A "<pre>$(Esc $f.Target)</pre>" }
@@ -822,6 +988,12 @@ foreach ($f in $sorted) {
   A '</div>'
 }
 
+A '<h2>Scan coverage</h2><div class="tw"><table><tr><th>Check</th><th>Status</th><th>Notes</th></tr>'
+foreach ($cv in $Coverage) {
+  $col = switch ($cv.Status) { 'Checked' { 'var(--ok)' } 'Limited' { 'var(--med)' } 'Skipped' { 'var(--mut)' } default { 'var(--high)' } }
+  A "<tr><td>$(Esc $cv.Title)</td><td><b style='color:$col'>$(Esc $cv.Status)</b></td><td>$(Esc $cv.Note)</td></tr>"
+}
+A '</table></div><p class="mut">Checked = completed without errors. Limited = completed, but some data could not be read. Skipped = not run (option off). Unavailable = the data source does not exist or is not accessible. Error = the step failed.</p>'
 A '<h2>Heaviest programs (CPU / GPU during sampling)</h2><div class="tw"><table><tr><th>Program</th><th>Instances</th><th>CPU, %</th><th>GPU, %</th><th>Signer</th><th>Path</th></tr>'
 foreach ($t in ($TopLoad | Sort-Object { $_.Cpu + $_.Gpu } -Descending | Select-Object -First 12)) {
   A "<tr><td>$(Esc $t.Name)</td><td>$($t.Count)</td><td>$($t.Cpu)</td><td>$($t.Gpu)</td><td>$(Esc $t.Signer)</td><td class='p'>$(Esc $t.Path)</td></tr>"
@@ -873,7 +1045,7 @@ if ($SignerRows.Count -gt 0) {
 }
 if ($VtRows.Count -gt 0) {
   $unk = @($VtRows | Where-Object { -not $_.Known }).Count
-  A "<h2>VirusTotal</h2><p>Hashes checked:$($VtRows.Count). Unknown to VirusTotal:$unk (a new or rare file - not necessarily malicious, but worth a closer look).</p>"
+  A "<h2>VirusTotal</h2><p>Hashes checked: $($VtRows.Count). Unknown to VirusTotal: $unk (a new or rare file - not necessarily malicious, but worth a closer look).</p>"
 }
 A "<h2>Administrators on this computer</h2><p>$(Esc ($admins -join ', '))</p><p class='mut'>There should be no unfamiliar accounts here.</p>"
 A '<h2>What the scanner cannot see</h2><div class="note"><ul><li><b>Kernel-level rootkits</b> and malicious drivers - they can hide from any program running inside Windows. This needs a check from outside the system: Microsoft Defender Offline or Kaspersky Rescue Disk.</li><li><b>Spyware hiding inside signed or legitimate programs</b> - a file signed with a stolen certificate looks valid by signature alone (use the VirusTotal check), and well-hidden injection (for example manually mapped code) may leave no trace in the module list.</li><li><b>Router, phone, cloud accounts</b> - these are separate places for surveillance (check "devices signed in to your account" in Google/Microsoft/Apple).</li></ul><p><b>What to do next:</b> 1) check the found files on VirusTotal by hash; 2) run <i>Autoruns</i> and <i>Process Explorer</i> (Sysinternals) with VirusTotal checking enabled; 3) run a full Defender + Malwarebytes scan; 4) if you suspect surveillance, change passwords from a <i>different</i> device and enable two-factor authentication.</p></div>'
@@ -883,6 +1055,7 @@ A '</main></body></html>'
 
 Write-Host ''
 Write-Host "Done. High risk: $cHigh, medium: $cMed, low: $cLow" -ForegroundColor Green
+Write-Host "Classes: $nConf confirmed threat(s), $nPup unwanted program(s), $nInd suspicious indicator(s). Coverage: $covOk of $($Coverage.Count) checks complete." -ForegroundColor Green
 foreach ($f in ($sorted | Select-Object -First 8)) {
   $col = if ($f.Points -ge 8) { 'Red' } elseif ($f.Points -ge 4) { 'Yellow' } else { 'Gray' }
   Write-Host ("  [{0}] {1}: {2}" -f (Get-SevName $f.Points), $f.Category, $f.Title) -ForegroundColor $col

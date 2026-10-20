@@ -45,7 +45,7 @@ function New-Ctl($type, $x, $y, $w, $h, $text) {
 $lblTitle = New-Ctl Label 16 12 800 28 'Hidden and masquerading program scanner'
 $lblTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14)
 $lblInfo = New-Ctl Label 16 44 810 38 'Looks for miners, spyware, programs masquerading as system processes and injected DLLs. Read-only: it deletes nothing and uploads nothing (except file hashes to VirusTotal, if you enable that).'
-$lblAdmin = New-Ctl Label 16 84 810 22 $(if ($isAdmin) { 'Administrator rights: yes - the result will be complete.' } else { 'Administrator rights: no - the result will be incomplete. Restart and approve the Windows prompt.' })
+$lblAdmin = New-Ctl Label 16 84 810 22 $(if ($isAdmin) { 'Administrator rights: yes - the most complete scan. The report lists exactly what was checked.' } else { 'Administrator rights: no - the result will be incomplete. Restart and approve the Windows prompt.' })
 $lblAdmin.ForeColor = $(if ($isAdmin) { [System.Drawing.Color]::FromArgb(7, 148, 85) } else { [System.Drawing.Color]::FromArgb(220, 104, 3) })
 
 $grp = New-Ctl GroupBox 16 112 810 128 'Options'
